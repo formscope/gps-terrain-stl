@@ -1,6 +1,6 @@
 # gps-terrain-stl
 
-Convert a GPS track (GPX or IGC) into a 3D printable terrain model — a circular disc with the track embossed or raised on the surface.
+Convert a GPS track (GPX or IGC) into a 3D printable terrain model — a circular disc with the track raised on the surface.
 
 ## Example output
 

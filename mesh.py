@@ -148,6 +148,7 @@ def build_and_export(
             import shapely as shp
             from shapely.geometry import Point as SPoint, Polygon as SPolygon, \
                 MultiPolygon as SMultiPolygon, LineString as SLineString
+            from shapely.ops import unary_union
 
             disc_shape = SPoint(0.0, 0.0).buffer(radius_mm)
             plate_thickness = 1.0
@@ -158,6 +159,23 @@ def build_and_export(
             if tx is not None and len(tx) >= 2:
                 groove_hw = track_width_mm / 2.0 + track_tolerance_mm
                 track_buf_ms = SLineString(zip(tx.tolist(), ty.tolist())).buffer(groove_hw)
+
+            # Pre-process: merge lake polygons that are contained within other lake
+            # polygons.  In OSM, islands within lakes are sometimes returned as
+            # separate closed-way polygons (distinct from the multipolygon relation
+            # that already carries them as interior rings).  Unioning all polygons
+            # and then taking the union resolves duplicates; remaining interior rings
+            # represent true islands.
+            if len(water_polys_lv95) > 1:
+                try:
+                    merged = unary_union(water_polys_lv95)
+                    if not merged.is_empty:
+                        if hasattr(merged, 'geoms'):
+                            water_polys_lv95 = list(merged.geoms)
+                        else:
+                            water_polys_lv95 = [merged]
+                except Exception:
+                    pass   # keep original list on failure
 
             for poly_lv95 in water_polys_lv95:
                 ext = list(poly_lv95.exterior.coords)
@@ -403,47 +421,53 @@ def _build_water_plate(poly, z_bot, z_top):
     """
     Build a watertight 1mm-thick flat plate from a shapely Polygon.
 
-    Step 1 — triangulate the top face: fan from representative_point()
-    (shapely guarantees this is strictly inside the polygon) to each
-    consecutive pair of exterior ring vertices.  Every ring edge appears
-    as exactly one face-triangle edge, so the mesh is always manifold
-    regardless of polygon shape.
+    Triangulates top and bottom faces using scipy Delaunay on all ring
+    vertices, then filters to triangles whose centroid lies inside the
+    polygon.  shapely.Polygon.contains() respects interior rings (islands),
+    so island areas are automatically excluded — no degenerate fan needed.
 
-    Step 2 — extrude 1 mm down: mirror each top triangle for the bottom
-    face, and lift the boundary edges (those not shared between two face
-    triangles) into side-wall quads.
-
-    Interior rings (holes left by track subtraction) are handled by
-    adding a second fan from the hole's representative point so the plate
-    has no open boundaries there either.
+    Side walls are built directly from exterior and interior ring coordinates.
+    Interior ring side walls use reversed winding so normals face into the
+    island (away from the solid plate material).
     """
+    import shapely as shp
+    from scipy.spatial import Delaunay
+
     tris = []
 
-    def _fan(ring_coords, px, py, flip_for_bottom=False):
-        """Return top + bottom face triangles for one ring fan."""
-        local = []
-        pts = ring_coords
-        n = len(pts)
-        for i in range(n):
-            ax, ay = pts[i]
-            bx, by = pts[(i + 1) % n]
-            if not flip_for_bottom:
-                # top face: CCW → normal up
-                local.append(((px, py, z_top), (ax, ay, z_top), (bx, by, z_top)))
-                # bottom face: CW → normal down
-                local.append(((px, py, z_bot), (bx, by, z_bot), (ax, ay, z_bot)))
-            else:
-                # hole interior fan: winding reversed so normals stay correct
-                local.append(((px, py, z_top), (bx, by, z_top), (ax, ay, z_top)))
-                local.append(((px, py, z_bot), (ax, ay, z_bot), (bx, by, z_bot)))
-        return local
+    # --- Triangulate top and bottom faces via Delaunay + containment filter ---
+    all_pts = list(poly.exterior.coords[:-1])
+    for ring in poly.interiors:
+        all_pts.extend(ring.coords[:-1])
+    pts_arr = np.array(all_pts, dtype=np.float64)
 
-    # --- Exterior ring ---
-    rp = poly.representative_point()
+    if len(pts_arr) >= 3:
+        try:
+            dt = Delaunay(pts_arr)
+            simplices = dt.simplices
+            # Compute centroids in bulk
+            v = pts_arr[simplices]          # (M, 3, 2)
+            cx = v[:, :, 0].mean(axis=1)   # (M,)
+            cy = v[:, :, 1].mean(axis=1)   # (M,)
+            inside = shp.contains_xy(poly, cx, cy)
+            for idx, keep in enumerate(inside):
+                if not keep:
+                    continue
+                v0, v1, v2 = pts_arr[simplices[idx]]
+                # Ensure CCW winding for top face (normal up)
+                cross = (v1[0]-v0[0])*(v2[1]-v0[1]) - (v1[1]-v0[1])*(v2[0]-v0[0])
+                if cross < 0:
+                    v1, v2 = v2, v1
+                a = (float(v0[0]), float(v0[1]))
+                b = (float(v1[0]), float(v1[1]))
+                c = (float(v2[0]), float(v2[1]))
+                tris.append((a + (z_top,), b + (z_top,), c + (z_top,)))   # top, normal up
+                tris.append((a + (z_bot,), c + (z_bot,), b + (z_bot,)))   # bottom, normal down
+        except Exception:
+            pass
+
+    # --- Side walls: exterior ring (normals point outward from lake) ---
     ext = [(x, y) for x, y in poly.exterior.coords[:-1]]
-    tris.extend(_fan(ext, rp.x, rp.y))
-
-    # Side walls along exterior ring
     n = len(ext)
     for i in range(n):
         ax, ay = ext[i]
@@ -451,12 +475,9 @@ def _build_water_plate(poly, z_bot, z_top):
         tris.append(((ax, ay, z_bot), (ax, ay, z_top), (bx, by, z_top)))
         tris.append(((ax, ay, z_bot), (bx, by, z_top), (bx, by, z_bot)))
 
-    # --- Interior rings (holes from track subtraction) ---
+    # --- Side walls: interior rings (normals point into the island) ---
     for hole in poly.interiors:
-        hrp = hole.interpolate(0.5, normalized=True)  # point on ring midpoint
         hpts = [(x, y) for x, y in hole.coords[:-1]]
-        # Use the hole's own coords as a fan; winding is CW for interior rings
-        tris.extend(_fan(hpts, hrp.x, hrp.y, flip_for_bottom=True))
         m = len(hpts)
         for i in range(m):
             ax, ay = hpts[i]

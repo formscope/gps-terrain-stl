@@ -3,3 +3,5 @@ __pycache__/
 *.igc
 *.stl
 *.3mf
+CLAUDE.md
+~/.cache/gps-terrain-stl/

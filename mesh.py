@@ -19,14 +19,16 @@ def build_and_export(
     track_width_mm: float = 1.0,
     track_raise_mm: float = 1.0,
     track_intrude_mm: float = 2.0,
+    track_tolerance_mm: float = 0.2,
+    water_polys_lv95: list | None = None,
 ) -> None:
     """
-    Build a solid circular terrain STL plus a separate track-tube body.
+    Build a solid circular terrain STL plus a track-tube body.
 
     The terrain disc is centred at (0,0), radius = diameter_mm/2.
-    The track is a continuous swept rectangular tube, disconnected from
-    the terrain, that intrudes track_intrude_mm into the surface and
-    rises track_raise_mm above it.
+    A groove is carved into the terrain along the track path with width
+    (track_width + 2*tolerance) down to basis_level, so the track tube
+    fits without intersection.
     """
     ce, cn = center_lv95
     radius_mm = diameter_mm / 2.0
@@ -79,6 +81,135 @@ def build_and_export(
     Zm = np.where(inside,
                   (Z_elev - elev_min) * scale_z + base_height_mm,
                   np.nan)
+
+    # ------------------------------------------------------------------
+    # 2b. Pre-compute track in model space and carve groove into Zm
+    #     (must happen before terrain triangles are built)
+    # ------------------------------------------------------------------
+    tx = ty = track_zm = tube_raise = tube_intrude = basis_level = None
+
+    if track_lv95:
+        track_e = np.array([p[0] for p in track_lv95])
+        track_n = np.array([p[1] for p in track_lv95])
+        tx = (track_e - ce) * scale_xy
+        ty = (track_n - cn) * scale_xy
+
+        if track_alts is not None:
+            # IGC: use real GPS altitude mapped through the same scale as terrain
+            track_zm = (np.array(track_alts, dtype=np.float64) - elev_min) * scale_z + base_height_mm
+            # Symmetric tube centred on the flight altitude
+            tube_raise = track_width_mm / 2.0
+            tube_intrude = track_width_mm / 2.0
+            print("  Using GPS altitude for track height")
+        else:
+            # GPX: snap to terrain surface + raise/intrude
+            track_elev = interp(np.stack([track_n, track_e], axis=1))
+            track_elev = np.where(np.isnan(track_elev), elev_min, track_elev)
+            track_zm = (track_elev - elev_min) * scale_z + base_height_mm
+            tube_raise = track_raise_mm
+            tube_intrude = track_intrude_mm
+
+        basis_level = float(np.min(track_zm) - tube_intrude)
+
+        # Carve groove: lower terrain to basis_level within (width/2 + tolerance)
+        # of the track path. Densify the track to sub-pixel spacing first so the
+        # groove boundary follows curves faithfully at the grid resolution.
+        pixel_size_mm = 2.0 * radius_mm / N
+        tx_dense, ty_dense = _densify_track(tx, ty, pixel_size_mm * 0.5)
+
+        groove_half_width = track_width_mm / 2.0 + track_tolerance_mm
+        min_dist_sq = np.full((N, N), np.inf)
+
+        for k in range(len(tx_dense) - 1):
+            ax, ay = float(tx_dense[k]), float(ty_dense[k])
+            bx, by = float(tx_dense[k + 1]), float(ty_dense[k + 1])
+            dx, dy = bx - ax, by - ay
+            seg_len2 = dx * dx + dy * dy
+            if seg_len2 < 1e-12:
+                d2 = (Xm - ax) ** 2 + (Ym - ay) ** 2
+            else:
+                t = np.clip(((Xm - ax) * dx + (Ym - ay) * dy) / seg_len2, 0.0, 1.0)
+                cx = ax + t * dx
+                cy = ay + t * dy
+                d2 = (Xm - cx) ** 2 + (Ym - cy) ** 2
+            np.minimum(min_dist_sq, d2, out=min_dist_sq)
+
+        groove_mask = (~np.isnan(Zm)) & (min_dist_sq < groove_half_width ** 2)
+        Zm = np.where(groove_mask & (Zm > basis_level), basis_level, Zm)
+
+    # ------------------------------------------------------------------
+    # 2c. Water polygon conversion + terrain carving
+    #     Must happen before terrain triangles are built.
+    # ------------------------------------------------------------------
+    water_parts_ms = []   # (shapely Polygon in model space, z_top, z_bot)
+
+    if water_polys_lv95:
+        try:
+            import shapely as shp
+            from shapely.geometry import Point as SPoint, Polygon as SPolygon, \
+                MultiPolygon as SMultiPolygon, LineString as SLineString
+
+            disc_shape = SPoint(0.0, 0.0).buffer(radius_mm)
+            plate_thickness = 1.0
+
+            # Build track buffer in model space for subtracting from water plates.
+            # Uses the same half-width as the terrain groove so the cutout matches.
+            track_buf_ms = None
+            if tx is not None and len(tx) >= 2:
+                groove_hw = track_width_mm / 2.0 + track_tolerance_mm
+                track_buf_ms = SLineString(zip(tx.tolist(), ty.tolist())).buffer(groove_hw)
+
+            for poly_lv95 in water_polys_lv95:
+                ext = list(poly_lv95.exterior.coords)
+                ext_ms = [((e - ce) * scale_xy, (n - cn) * scale_xy) for e, n in ext]
+                holes_ms = [
+                    [((e - ce) * scale_xy, (n - cn) * scale_xy) for e, n in ring.coords]
+                    for ring in poly_lv95.interiors
+                ]
+                try:
+                    poly_ms = SPolygon(ext_ms, holes_ms)
+                    if not poly_ms.is_valid:
+                        poly_ms = poly_ms.buffer(0)
+                except Exception:
+                    continue
+
+                clipped = poly_ms.intersection(disc_shape)
+                if clipped.is_empty:
+                    continue
+
+                # Subtract track groove from water polygon so the two parts
+                # don't intersect and can be printed as separate bodies.
+                if track_buf_ms is not None:
+                    clipped = clipped.difference(track_buf_ms)
+                    if clipped.is_empty:
+                        continue
+
+                parts = [g for g in (clipped.geoms if hasattr(clipped, 'geoms') else [clipped])
+                         if isinstance(g, SPolygon) and not g.is_empty]
+
+                for part in parts:
+                    # Sample terrain elevation at centroid for plate height
+                    cent = part.centroid
+                    wlv95_e = ce + cent.x / scale_xy
+                    wlv95_n = cn + cent.y / scale_xy
+                    w_elev = interp(np.array([[wlv95_n, wlv95_e]]))[0]
+                    if np.isnan(w_elev):
+                        w_elev = elev_min
+                    z_top = (w_elev - elev_min) * scale_z + base_height_mm
+                    z_bot = z_top - plate_thickness
+
+                    # Carve terrain: rasterize polygon (buffered by tolerance)
+                    carved = part.buffer(track_tolerance_mm)
+                    water_mask = shp.contains_xy(
+                        carved, Xm.ravel(), Ym.ravel()
+                    ).reshape(N, N)
+                    water_mask &= ~np.isnan(Zm)
+                    Zm = np.where(water_mask & (Zm > z_bot), z_bot, Zm)
+
+                    water_parts_ms.append((part, z_top, z_bot))
+
+        except ImportError:
+            pass
 
     # ------------------------------------------------------------------
     # 3. Terrain top-surface triangles
@@ -151,37 +282,28 @@ def build_and_export(
     terrain_count = len(triangles)
 
     # ------------------------------------------------------------------
-    # 6. Track tube — separate body
+    # 6. Track tube
     # ------------------------------------------------------------------
-    if track_lv95:
-        track_e = np.array([p[0] for p in track_lv95])
-        track_n = np.array([p[1] for p in track_lv95])
-        tx = (track_e - ce) * scale_xy
-        ty = (track_n - cn) * scale_xy
-
-        if track_alts is not None:
-            # IGC: use real GPS altitude mapped through the same scale as terrain
-            track_zm = (np.array(track_alts, dtype=np.float64) - elev_min) * scale_z + base_height_mm
-            # Symmetric tube centred on the flight altitude — no terrain intrusion
-            tube_raise = track_width_mm / 2.0
-            tube_intrude = track_width_mm / 2.0
-            print("  Using GPS altitude for track height")
-        else:
-            # GPX: snap to terrain surface + raise/intrude
-            track_elev = interp(np.stack([track_n, track_e], axis=1))
-            track_elev = np.where(np.isnan(track_elev), elev_min, track_elev)
-            track_zm = (track_elev - elev_min) * scale_z + base_height_mm
-            tube_raise = track_raise_mm
-            tube_intrude = track_intrude_mm
-
+    if track_lv95 and tx is not None:
         track_tris = _build_track_tube(
-            tx, ty, track_zm, track_width_mm, tube_raise, tube_intrude,
+            tx, ty, track_zm, track_width_mm, tube_raise, basis_level,
         )
         triangles.extend(track_tris)
         print(f"  Track tube: {len(track_tris)} triangles")
 
     # ------------------------------------------------------------------
-    # 7. Export
+    # 7. Water plates
+    # ------------------------------------------------------------------
+    if water_parts_ms:
+        water_tri_count = 0
+        for part, z_top, z_bot in water_parts_ms:
+            plate_tris = _build_water_plate(part, z_bot, z_top)
+            triangles.extend(plate_tris)
+            water_tri_count += len(plate_tris)
+        print(f"  Water plates: {water_tri_count} triangles")
+
+    # ------------------------------------------------------------------
+    # 8. Export
     # ------------------------------------------------------------------
     solid = stl_mesh.Mesh(np.zeros(len(triangles), dtype=stl_mesh.Mesh.dtype))
     for i, (v0, v1, v2) in enumerate(triangles):
@@ -193,16 +315,79 @@ def build_and_export(
 
 
 # ------------------------------------------------------------------
+# Water plate builder
+# ------------------------------------------------------------------
+
+def _build_water_plate(poly, z_bot, z_top):
+    """
+    Build a watertight 1mm-thick flat plate from a shapely Polygon.
+
+    Uses a centroid-fan triangulation: every boundary edge is exactly one
+    triangle edge, so side walls share edges perfectly with the top/bottom
+    faces — no T-junctions, no non-manifold edges, no external dependencies.
+
+    Any islands (interior rings) are filled solid rather than left as
+    through-holes; this keeps the mesh simple and manifold.
+    """
+    tris = []
+    cx, cy = poly.centroid.x, poly.centroid.y
+
+    # Exterior top / bottom faces — fan from centroid.
+    # Shapely guarantees the exterior ring is CCW from above.
+    ext = list(poly.exterior.coords[:-1])   # drop closing duplicate
+    n = len(ext)
+    for i in range(n):
+        a = ext[i]
+        b = ext[(i + 1) % n]
+        # Top face: CCW → normal up
+        tris.append(((cx, cy, z_top), (a[0], a[1], z_top), (b[0], b[1], z_top)))
+        # Bottom face: reversed → normal down
+        tris.append(((cx, cy, z_bot), (b[0], b[1], z_bot), (a[0], a[1], z_bot)))
+
+    # Exterior side walls
+    for i in range(n):
+        a, b = ext[i], ext[(i + 1) % n]
+        tris.append(((a[0], a[1], z_bot), (a[0], a[1], z_top), (b[0], b[1], z_top)))
+        tris.append(((a[0], a[1], z_bot), (b[0], b[1], z_top), (b[0], b[1], z_bot)))
+
+    return tris
+
+
+# ------------------------------------------------------------------
+# Track helpers
+# ------------------------------------------------------------------
+
+def _densify_track(tx, ty, max_step_mm):
+    """
+    Linearly interpolate along the track so no segment exceeds max_step_mm.
+    Returns densified (tx, ty) arrays suitable for sub-pixel groove carving.
+    """
+    xs, ys = [tx[0]], [ty[0]]
+    for k in range(len(tx) - 1):
+        dx, dy = tx[k + 1] - tx[k], ty[k + 1] - ty[k]
+        seg_len = np.hypot(dx, dy)
+        n = max(1, int(np.ceil(seg_len / max_step_mm)))
+        for i in range(1, n + 1):
+            t = i / n
+            xs.append(tx[k] + t * dx)
+            ys.append(ty[k] + t * dy)
+    return np.array(xs), np.array(ys)
+
+
+# ------------------------------------------------------------------
 # Track tube builder
 # ------------------------------------------------------------------
 
-def _build_track_tube(tx, ty, track_zm, width_mm, raise_mm, intrude_mm):
+def _build_track_tube(tx, ty, track_zm, width_mm, raise_mm, basis_level):
     """
     Continuous watertight rectangular tube swept along the track polyline.
 
     A cross-section is placed at every track point using the averaged travel
     direction (miter joints), so consecutive sections share edges with no gaps.
     Only the very first and last cross-sections receive end caps.
+
+    basis_level is the constant bottom Z for all cross-sections — the lowest
+    point of the tube including intrusion, shared across the whole track.
     """
     n = len(tx)
     if n < 2:
@@ -226,11 +411,12 @@ def _build_track_tube(tx, ty, track_zm, width_mm, raise_mm, intrude_mm):
             perps.append((-dy / length, dx / length))
 
     # Cross-section at each point: (left-top, right-top, left-bot, right-bot)
+    # Bottom is a flat plane at basis_level shared across all sections.
     sections = []
     for k in range(n):
         nx, ny = perps[k]
         zt = float(track_zm[k]) + raise_mm
-        zb = float(track_zm[k]) - intrude_mm
+        zb = basis_level
         sections.append((
             (tx[k] + nx * hw, ty[k] + ny * hw, zt),   # left-top
             (tx[k] - nx * hw, ty[k] - ny * hw, zt),   # right-top

@@ -7,6 +7,7 @@ Output: a round, solid STL disc centred on the track, 100 mm diameter by default
 """
 
 import argparse
+import os
 import sys
 
 import numpy as np
@@ -15,6 +16,7 @@ from parse import load_track
 from geometry import compute_geometry, wgs84_to_lv95
 from elevation import fetch_elevation
 from mesh import build_and_export
+from water import fetch_water_bodies
 
 
 def main():
@@ -23,7 +25,7 @@ def main():
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
     parser.add_argument("input", help="Input GPS file (.gpx or .igc)")
-    parser.add_argument("-o", "--output", default="terrain.stl", help="Output STL file")
+    parser.add_argument("-o", "--output", default=None, help="Output STL file (default: input filename with .stl extension)")
     parser.add_argument("--diameter", type=float, default=100.0,
                         help="Output disc diameter in mm")
     parser.add_argument("--padding", type=float, default=0.20,
@@ -40,7 +42,16 @@ def main():
                         help="How far the track rises above terrain in mm")
     parser.add_argument("--track-intrude", type=float, default=2.0,
                         help="How far the track intrudes into terrain in mm")
+    parser.add_argument("--track-tolerance", type=float, default=0.2,
+                        help="Clearance gap carved into terrain on each side of track in mm")
+    parser.add_argument("--min-water-area", type=float, default=100_000,
+                        help="Minimum water body area in m² to include (default: 100,000 = 10 ha)")
+    parser.add_argument("--no-water", action="store_true",
+                        help="Skip water body detection and plates")
     args = parser.parse_args()
+
+    if args.output is None:
+        args.output = os.path.splitext(args.input)[0] + ".stl"
 
     # --- Load track ---
     print(f"Loading track: {args.input}")
@@ -70,6 +81,14 @@ def main():
     # Altitude is present for IGC files (3-tuple), absent for GPX (2-tuple)
     track_alts = [p[2] for p in points] if len(points[0]) > 2 else None
 
+    # --- Water bodies ---
+    if args.no_water:
+        water_polys = []
+    else:
+        print("Fetching water bodies from OpenStreetMap…")
+        water_polys = fetch_water_bodies(center_lv95, radius_m, min_area_m2=args.min_water_area)
+        print(f"  {len(water_polys)} water polygon(s) found")
+
     # --- Build mesh & export ---
     print("Building mesh…")
     build_and_export(
@@ -86,6 +105,8 @@ def main():
         track_width_mm=args.track_width,
         track_raise_mm=args.track_raise,
         track_intrude_mm=args.track_intrude,
+        track_tolerance_mm=args.track_tolerance,
+        water_polys_lv95=water_polys,
     )
     print("Done.")
 

@@ -322,36 +322,48 @@ def _build_water_plate(poly, z_bot, z_top):
     """
     Build a watertight 1mm-thick flat plate from a shapely Polygon.
 
-    Top and bottom faces use shapely.triangulate_polygon (constrained Delaunay),
-    which respects concave outlines and interior holes exactly.
-    Side walls are built from every boundary ring (exterior + interiors).
+    Uses filtered Delaunay for the top/bottom faces (handles concave shapes).
+    Side walls are derived from the boundary edges of the face triangulation
+    itself (directed-edge cancellation), not from the ring coordinates.
+    This guarantees every edge is shared by exactly 2 triangles regardless
+    of how the Delaunay chose to connect the vertices.
     """
-    import shapely as shp
     from shapely.ops import triangulate as shp_triangulate
 
     tris = []
 
-    # --- Top and bottom faces via filtered Delaunay triangulation ---
-    # shapely.ops.triangulate is unconstrained (may produce triangles outside
-    # the polygon for concave shapes), so filter by centroid containment.
-    face_tris = [t for t in shp_triangulate(poly) if poly.contains(t.centroid)]
+    # Filtered Delaunay: keep only triangles whose centroid lies inside the
+    # polygon. Use a tiny buffer so centroids on the exact boundary are kept.
+    poly_buf = poly.buffer(1e-6)
+    face_tris = [t for t in shp_triangulate(poly) if poly_buf.contains(t.centroid)]
+    if not face_tris:
+        return tris
+
+    # Directed-edge tracking: interior edges appear twice (opposite directions)
+    # and cancel; what remains are the boundary edges with correct outward winding.
+    boundary_edges: dict[tuple, bool] = {}
+
     for tri in face_tris:
-        coords = list(tri.exterior.coords[:3])   # 3 vertices
+        # Round to avoid float noise in edge matching
+        coords = [(round(x, 9), round(y, 9)) for x, y in tri.exterior.coords[:3]]
         a, b, c = coords[0], coords[1], coords[2]
-        # Top face: preserve winding → normal up
+
+        # Top face: CCW winding → normal up
         tris.append(((a[0], a[1], z_top), (b[0], b[1], z_top), (c[0], c[1], z_top)))
-        # Bottom face: flip winding → normal down
+        # Bottom face: CW winding → normal down
         tris.append(((a[0], a[1], z_bot), (c[0], c[1], z_bot), (b[0], b[1], z_bot)))
 
-    # --- Side walls for every ring (exterior + holes) ---
-    rings = [poly.exterior] + list(poly.interiors)
-    for ring in rings:
-        coords = list(ring.coords[:-1])   # drop closing duplicate
-        n = len(coords)
-        for i in range(n):
-            a, b = coords[i], coords[(i + 1) % n]
-            tris.append(((a[0], a[1], z_bot), (a[0], a[1], z_top), (b[0], b[1], z_top)))
-            tris.append(((a[0], a[1], z_bot), (b[0], b[1], z_top), (b[0], b[1], z_bot)))
+        # Register directed edges; cancel reverse duplicates (interior edges)
+        for v1, v2 in ((a, b), (b, c), (c, a)):
+            if (v2, v1) in boundary_edges:
+                del boundary_edges[(v2, v1)]
+            else:
+                boundary_edges[(v1, v2)] = True
+
+    # Side walls for boundary edges only — guaranteed manifold
+    for (v1, v2) in boundary_edges:
+        tris.append(((v1[0], v1[1], z_bot), (v1[0], v1[1], z_top), (v2[0], v2[1], z_top)))
+        tris.append(((v1[0], v1[1], z_bot), (v2[0], v2[1], z_top), (v2[0], v2[1], z_bot)))
 
     return tris
 

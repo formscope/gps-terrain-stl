@@ -305,7 +305,12 @@ def build_and_export(
         print(f"  Water plates: {water_tri_count} triangles")
 
     # ------------------------------------------------------------------
-    # 8. Export
+    # 8. Remove small disconnected components (artifact filter)
+    # ------------------------------------------------------------------
+    triangles = _remove_small_components(triangles, min_area_mm2=1.0)
+
+    # ------------------------------------------------------------------
+    # 9. Export
     # ------------------------------------------------------------------
     solid = stl_mesh.Mesh(np.zeros(len(triangles), dtype=stl_mesh.Mesh.dtype))
     for i, (v0, v1, v2) in enumerate(triangles):
@@ -314,6 +319,80 @@ def build_and_export(
     solid.save(output_path)
     print(f"  Total: {len(triangles)} triangles "
           f"({terrain_count} terrain + {len(triangles) - terrain_count} track)")
+
+
+# ------------------------------------------------------------------
+# Artifact filter: remove small disconnected components
+# ------------------------------------------------------------------
+
+def _remove_small_components(triangles: list, min_area_mm2: float = 1.0) -> list:
+    """
+    Drop any group of triangles that is disconnected from the rest of the
+    mesh AND whose total surface area is below min_area_mm2.
+
+    Works by union-find on rounded vertex positions: two triangles belong to
+    the same component if they share at least one vertex (after rounding to
+    3 decimal places = 1 µm).  Components whose summed triangle area is below
+    the threshold are discarded.
+    """
+    if not triangles:
+        return triangles
+
+    n = len(triangles)
+    tri_arr = np.array(triangles, dtype=np.float64)   # (N, 3, 3)
+
+    # Map each unique rounded vertex to an integer id
+    vert_id: dict[tuple, int] = {}
+    tri_vids = np.empty((n, 3), dtype=np.int32)
+    for i, (v0, v1, v2) in enumerate(triangles):
+        for j, v in enumerate((v0, v1, v2)):
+            key = (round(v[0], 3), round(v[1], 3), round(v[2], 3))
+            if key not in vert_id:
+                vert_id[key] = len(vert_id)
+            tri_vids[i, j] = vert_id[key]
+
+    # Union-Find (path-compressed)
+    parent = list(range(len(vert_id)))
+
+    def find(x: int) -> int:
+        while parent[x] != x:
+            parent[x] = parent[parent[x]]
+            x = parent[x]
+        return x
+
+    def union(x: int, y: int) -> None:
+        px, py = find(x), find(y)
+        if px != py:
+            parent[px] = py
+
+    for a, b, c in tri_vids:
+        union(a, b)
+        union(b, c)
+
+    # Group triangle indices by component root
+    from collections import defaultdict
+    comp: dict[int, list[int]] = defaultdict(list)
+    for i, (a, _, _) in enumerate(tri_vids):
+        comp[find(a)].append(i)
+
+    # Per-triangle area (half cross-product magnitude)
+    e1 = tri_arr[:, 1] - tri_arr[:, 0]
+    e2 = tri_arr[:, 2] - tri_arr[:, 0]
+    areas = 0.5 * np.linalg.norm(np.cross(e1, e2), axis=1)
+
+    result: list = []
+    n_removed = 0
+    for idxs in comp.values():
+        if areas[idxs].sum() >= min_area_mm2:
+            result.extend(triangles[i] for i in idxs)
+        else:
+            n_removed += len(idxs)
+
+    if n_removed:
+        print(f"  Removed {n_removed} artifact triangles ({len(comp)} → "
+              f"{len(comp) - sum(1 for idxs in comp.values() if areas[idxs].sum() < min_area_mm2)} components)")
+
+    return result
 
 
 # ------------------------------------------------------------------

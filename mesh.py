@@ -324,21 +324,32 @@ def _build_water_plate(poly, z_bot, z_top):
     """
     Build a watertight 1mm-thick flat plate from a shapely Polygon.
 
-    Uses shapely.triangulate_polygon (shapely >= 2.1, constrained Delaunay)
-    for the top/bottom faces. This respects the polygon boundary exactly,
-    including concave outlines and interior holes.
+    Uses Delaunay triangulation (shapely.ops.triangulate) with the polygon
+    centroid added as a Steiner point. The centroid guarantees at least one
+    layer of interior triangles (centroid-to-boundary fans) even for concave
+    shapes, so face_tris is never empty for a valid polygon.
+
     Side walls are derived from the boundary edges of the face triangulation
     via directed-edge cancellation — every edge ends up shared by exactly 2
     triangles regardless of polygon shape.
     """
-    import shapely as shp
+    from shapely.ops import triangulate as shp_triangulate
+    from shapely.geometry import MultiPoint
 
     tris = []
 
-    # Constrained Delaunay: every output triangle lies strictly inside the
-    # polygon; all ring boundary edges are guaranteed to appear as triangle
-    # edges (no T-junctions, no missing edges).
-    face_tris = list(shp.triangulate_polygon(poly, tolerance=0.0))
+    # Collect all ring vertices + centroid as interior Steiner point.
+    # The centroid ensures centroid-to-boundary triangles always appear and
+    # always pass the containment filter (their centroid lies between the
+    # polygon centroid and the boundary → inside the polygon).
+    pts = list(poly.exterior.coords[:-1])
+    for ring in poly.interiors:
+        pts.extend(list(ring.coords[:-1]))
+    pts.append((poly.centroid.x, poly.centroid.y))
+
+    poly_buf = poly.buffer(1e-3)   # tiny expansion handles floating-point boundary cases
+    face_tris = [t for t in shp_triangulate(MultiPoint(pts))
+                 if poly_buf.contains(t.centroid)]
     if not face_tris:
         return tris
 

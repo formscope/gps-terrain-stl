@@ -324,60 +324,66 @@ def _build_water_plate(poly, z_bot, z_top):
     """
     Build a watertight 1mm-thick flat plate from a shapely Polygon.
 
-    Uses Delaunay triangulation (shapely.ops.triangulate) with the polygon
-    centroid added as a Steiner point. The centroid guarantees at least one
-    layer of interior triangles (centroid-to-boundary fans) even for concave
-    shapes, so face_tris is never empty for a valid polygon.
+    Step 1 — triangulate the top face: fan from representative_point()
+    (shapely guarantees this is strictly inside the polygon) to each
+    consecutive pair of exterior ring vertices.  Every ring edge appears
+    as exactly one face-triangle edge, so the mesh is always manifold
+    regardless of polygon shape.
 
-    Side walls are derived from the boundary edges of the face triangulation
-    via directed-edge cancellation — every edge ends up shared by exactly 2
-    triangles regardless of polygon shape.
+    Step 2 — extrude 1 mm down: mirror each top triangle for the bottom
+    face, and lift the boundary edges (those not shared between two face
+    triangles) into side-wall quads.
+
+    Interior rings (holes left by track subtraction) are handled by
+    adding a second fan from the hole's representative point so the plate
+    has no open boundaries there either.
     """
-    from shapely.ops import triangulate as shp_triangulate
-    from shapely.geometry import MultiPoint
-
     tris = []
 
-    # Collect all ring vertices + centroid as interior Steiner point.
-    # The centroid ensures centroid-to-boundary triangles always appear and
-    # always pass the containment filter (their centroid lies between the
-    # polygon centroid and the boundary → inside the polygon).
-    pts = list(poly.exterior.coords[:-1])
-    for ring in poly.interiors:
-        pts.extend(list(ring.coords[:-1]))
-    pts.append((poly.centroid.x, poly.centroid.y))
-
-    poly_buf = poly.buffer(1e-3)   # tiny expansion handles floating-point boundary cases
-    face_tris = [t for t in shp_triangulate(MultiPoint(pts))
-                 if poly_buf.contains(t.centroid)]
-    if not face_tris:
-        return tris
-
-    # Directed-edge tracking: interior edges appear twice (opposite directions)
-    # and cancel; what remains are the boundary edges with correct outward winding.
-    boundary_edges: dict[tuple, bool] = {}
-
-    for tri in face_tris:
-        # Round to avoid float noise in edge matching
-        coords = [(round(x, 9), round(y, 9)) for x, y in tri.exterior.coords[:3]]
-        a, b, c = coords[0], coords[1], coords[2]
-
-        # Top face: CCW winding → normal up
-        tris.append(((a[0], a[1], z_top), (b[0], b[1], z_top), (c[0], c[1], z_top)))
-        # Bottom face: CW winding → normal down
-        tris.append(((a[0], a[1], z_bot), (c[0], c[1], z_bot), (b[0], b[1], z_bot)))
-
-        # Register directed edges; cancel reverse duplicates (interior edges)
-        for v1, v2 in ((a, b), (b, c), (c, a)):
-            if (v2, v1) in boundary_edges:
-                del boundary_edges[(v2, v1)]
+    def _fan(ring_coords, px, py, flip_for_bottom=False):
+        """Return top + bottom face triangles for one ring fan."""
+        local = []
+        pts = ring_coords
+        n = len(pts)
+        for i in range(n):
+            ax, ay = pts[i]
+            bx, by = pts[(i + 1) % n]
+            if not flip_for_bottom:
+                # top face: CCW → normal up
+                local.append(((px, py, z_top), (ax, ay, z_top), (bx, by, z_top)))
+                # bottom face: CW → normal down
+                local.append(((px, py, z_bot), (bx, by, z_bot), (ax, ay, z_bot)))
             else:
-                boundary_edges[(v1, v2)] = True
+                # hole interior fan: winding reversed so normals stay correct
+                local.append(((px, py, z_top), (bx, by, z_top), (ax, ay, z_top)))
+                local.append(((px, py, z_bot), (ax, ay, z_bot), (bx, by, z_bot)))
+        return local
 
-    # Side walls for boundary edges only — guaranteed manifold
-    for (v1, v2) in boundary_edges:
-        tris.append(((v1[0], v1[1], z_bot), (v1[0], v1[1], z_top), (v2[0], v2[1], z_top)))
-        tris.append(((v1[0], v1[1], z_bot), (v2[0], v2[1], z_top), (v2[0], v2[1], z_bot)))
+    # --- Exterior ring ---
+    rp = poly.representative_point()
+    ext = [(x, y) for x, y in poly.exterior.coords[:-1]]
+    tris.extend(_fan(ext, rp.x, rp.y))
+
+    # Side walls along exterior ring
+    n = len(ext)
+    for i in range(n):
+        ax, ay = ext[i]
+        bx, by = ext[(i + 1) % n]
+        tris.append(((ax, ay, z_bot), (ax, ay, z_top), (bx, by, z_top)))
+        tris.append(((ax, ay, z_bot), (bx, by, z_top), (bx, by, z_bot)))
+
+    # --- Interior rings (holes from track subtraction) ---
+    for hole in poly.interiors:
+        hrp = hole.interpolate(0.5, normalized=True)  # point on ring midpoint
+        hpts = [(x, y) for x, y in hole.coords[:-1]]
+        # Use the hole's own coords as a fan; winding is CW for interior rings
+        tris.extend(_fan(hpts, hrp.x, hrp.y, flip_for_bottom=True))
+        m = len(hpts)
+        for i in range(m):
+            ax, ay = hpts[i]
+            bx, by = hpts[(i + 1) % m]
+            tris.append(((ax, ay, z_bot), (bx, by, z_top), (ax, ay, z_top)))
+            tris.append(((ax, ay, z_bot), (bx, by, z_bot), (bx, by, z_top)))
 
     return tris
 

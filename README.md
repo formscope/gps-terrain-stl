@@ -16,8 +16,8 @@ pip install -r requirements.txt
 ```
 
 Elevation data is fetched automatically:
-- **SwissALTI3D** (Swisstopo WCS) — high resolution, Switzerland only
-- **Copernicus DEM GLO-30** (AWS S3, public) — 30 m global coverage, used as fallback
+- **SwissALTI3D** (Swisstopo STAC API) — 2 m resolution, Switzerland only; tiles cached in `~/.cache/gps-terrain-stl/swissalti3d/`
+- **Copernicus DEM GLO-30** (AWS S3, public) — 30 m global coverage, used as fallback; tiles cached in `~/.cache/gps-terrain-stl/copernicus/`
 
 Water body data is fetched from **OpenStreetMap** via the Overpass API and cached locally in `~/.cache/gps-terrain-stl/water/`.
 
@@ -56,7 +56,7 @@ python3 main.py Halbmarathon.gpx --no-water
 | `--track-raise` | `0.6` | How far the track rises above terrain in mm (GPX) |
 | `--track-intrude` | `2.0` | How deep the track cuts into terrain in mm (GPX) |
 | `--track-tolerance` | `0.2` | Clearance gap between track and terrain groove in mm |
-| `--min-water-area` | `100000` | Minimum lake area in m² to include (default = 10 ha) |
+| `--min-water-area` | `500000` | Minimum lake area in m² to include (default = 50 ha) |
 | `--no-water` | off | Skip water body detection entirely |
 
 ## Output parts

@@ -44,7 +44,7 @@ def main():
                         help="How far the track intrudes into terrain in mm")
     parser.add_argument("--track-tolerance", type=float, default=0.2,
                         help="Clearance gap carved into terrain on each side of track in mm")
-    parser.add_argument("--min-water-area", type=float, default=100_000,
+    parser.add_argument("--min-water-area", type=float, default=500_000,
                         help="Minimum water body area in m² to include (default: 100,000 = 10 ha)")
     parser.add_argument("--no-water", action="store_true",
                         help="Skip water body detection and plates")

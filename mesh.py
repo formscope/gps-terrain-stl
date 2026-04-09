@@ -322,20 +322,21 @@ def _build_water_plate(poly, z_bot, z_top):
     """
     Build a watertight 1mm-thick flat plate from a shapely Polygon.
 
-    Uses filtered Delaunay for the top/bottom faces (handles concave shapes).
+    Uses shapely.triangulate_polygon (shapely >= 2.1, constrained Delaunay)
+    for the top/bottom faces. This respects the polygon boundary exactly,
+    including concave outlines and interior holes.
     Side walls are derived from the boundary edges of the face triangulation
-    itself (directed-edge cancellation), not from the ring coordinates.
-    This guarantees every edge is shared by exactly 2 triangles regardless
-    of how the Delaunay chose to connect the vertices.
+    via directed-edge cancellation — every edge ends up shared by exactly 2
+    triangles regardless of polygon shape.
     """
-    from shapely.ops import triangulate as shp_triangulate
+    import shapely as shp
 
     tris = []
 
-    # Filtered Delaunay: keep only triangles whose centroid lies inside the
-    # polygon. Use a tiny buffer so centroids on the exact boundary are kept.
-    poly_buf = poly.buffer(1e-6)
-    face_tris = [t for t in shp_triangulate(poly) if poly_buf.contains(t.centroid)]
+    # Constrained Delaunay: every output triangle lies strictly inside the
+    # polygon; all ring boundary edges are guaranteed to appear as triangle
+    # edges (no T-junctions, no missing edges).
+    face_tris = list(shp.triangulate_polygon(poly, tolerance=0.0))
     if not face_tris:
         return tris
 

@@ -57,6 +57,7 @@ python3 main.py Halbmarathon.gpx --no-water
 | `--track-intrude` | `2.0` | How deep the track cuts into terrain in mm (GPX) |
 | `--track-tolerance` | `0.2` | Clearance gap between track and terrain groove in mm |
 | `--min-water-area` | `500000` | Minimum lake area in m² to include (default = 50 ha) |
+| `--rivers` | off | Include rivers and riverbanks as water plates |
 | `--no-water` | off | Skip water body detection entirely |
 
 ## Output parts

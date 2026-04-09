@@ -46,6 +46,8 @@ def main():
                         help="Clearance gap carved into terrain on each side of track in mm")
     parser.add_argument("--min-water-area", type=float, default=500_000,
                         help="Minimum water body area in m² to include (default: 500,000 = 50 ha)")
+    parser.add_argument("--rivers", action="store_true",
+                        help="Include rivers and riverbanks as water plates (disabled by default)")
     parser.add_argument("--no-water", action="store_true",
                         help="Skip water body detection and plates")
     args = parser.parse_args()
@@ -86,7 +88,8 @@ def main():
         water_polys = []
     else:
         print("Fetching water bodies from OpenStreetMap…")
-        water_polys = fetch_water_bodies(center_lv95, radius_m, min_area_m2=args.min_water_area)
+        water_polys = fetch_water_bodies(center_lv95, radius_m, min_area_m2=args.min_water_area,
+                                         include_rivers=args.rivers)
         print(f"  {len(water_polys)} water polygon(s) found")
 
     # --- Build mesh & export ---

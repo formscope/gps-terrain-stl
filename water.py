@@ -22,9 +22,18 @@ OVERPASS_MIRRORS = [
 CACHE_DIR = os.path.expanduser("~/.cache/gps-terrain-stl/water")
 
 
-def fetch_water_bodies(center_lv95: tuple, radius_m: float, min_area_m2: float = 100_000) -> list:
+def fetch_water_bodies(
+    center_lv95: tuple,
+    radius_m: float,
+    min_area_m2: float = 100_000,
+    include_rivers: bool = False,
+) -> list:
     """
     Query Overpass for natural=water / landuse=reservoir polygons in the area.
+
+    When include_rivers is True also fetches natural=water + water=river and
+    waterway=riverbank polygons (disabled by default because they produce thin
+    elongated plates that can look odd on small discs).
 
     Results are cached locally so repeated runs skip the network request.
     Returns a list of shapely Polygon objects in LV95 coordinates,
@@ -44,18 +53,29 @@ def fetch_water_bodies(center_lv95: tuple, radius_m: float, min_area_m2: float =
     south, north = min(lats), max(lats)
     west,  east  = min(lons), max(lons)
 
-    # Exclude rivers, canals and streams — they appear as thin elongated
-    # polygons that look wrong on a terrain disc.
-    exclude = '["water"!="river"]["water"!="canal"]["water"!="stream"]'
+    bb = f"({south},{west},{north},{east})"
+
+    if include_rivers:
+        # Include rivers; still exclude canals and streams.
+        exclude = '["water"!="canal"]["water"!="stream"]'
+        river_lines = (
+            f'  way["waterway"="riverbank"]{bb};\n'
+            f'  relation["waterway"="riverbank"]["type"="multipolygon"]{bb};\n'
+        )
+    else:
+        # Exclude rivers, canals and streams — they appear as thin elongated
+        # polygons that look wrong on a terrain disc.
+        exclude = '["water"!="river"]["water"!="canal"]["water"!="stream"]'
+        river_lines = ""
+
     query = (
         f"[out:json][timeout:60];\n"
         f"(\n"
-        f'  way["natural"="water"]{exclude}({south},{west},{north},{east});\n'
-        f'  relation["natural"="water"]["type"="multipolygon"]{exclude}'
-        f'({south},{west},{north},{east});\n'
-        f'  way["landuse"="reservoir"]({south},{west},{north},{east});\n'
-        f'  relation["landuse"="reservoir"]["type"="multipolygon"]'
-        f'({south},{west},{north},{east});\n'
+        f'  way["natural"="water"]{exclude}{bb};\n'
+        f'  relation["natural"="water"]["type"="multipolygon"]{exclude}{bb};\n'
+        f'  way["landuse"="reservoir"]{bb};\n'
+        f'  relation["landuse"="reservoir"]["type"="multipolygon"]{bb};\n'
+        f"{river_lines}"
         f");\n"
         f"out geom;\n"
     )

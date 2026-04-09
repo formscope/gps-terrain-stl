@@ -184,8 +184,10 @@ def build_and_export(
                     if clipped.is_empty:
                         continue
 
+                # 1 mm² minimum: filters slivers produced by disc-clip or
+                # track subtraction, even when the parent lake passed the OSM filter.
                 parts = [g for g in (clipped.geoms if hasattr(clipped, 'geoms') else [clipped])
-                         if isinstance(g, SPolygon) and not g.is_empty]
+                         if isinstance(g, SPolygon) and not g.is_empty and g.area >= 1.0]
 
                 for part in parts:
                     # Sample terrain elevation at centroid for plate height

@@ -322,33 +322,36 @@ def _build_water_plate(poly, z_bot, z_top):
     """
     Build a watertight 1mm-thick flat plate from a shapely Polygon.
 
-    Uses a centroid-fan triangulation: every boundary edge is exactly one
-    triangle edge, so side walls share edges perfectly with the top/bottom
-    faces — no T-junctions, no non-manifold edges, no external dependencies.
-
-    Any islands (interior rings) are filled solid rather than left as
-    through-holes; this keeps the mesh simple and manifold.
+    Top and bottom faces use shapely.triangulate_polygon (constrained Delaunay),
+    which respects concave outlines and interior holes exactly.
+    Side walls are built from every boundary ring (exterior + interiors).
     """
+    import shapely as shp
+    from shapely.ops import triangulate as shp_triangulate
+
     tris = []
-    cx, cy = poly.centroid.x, poly.centroid.y
 
-    # Exterior top / bottom faces — fan from centroid.
-    # Shapely guarantees the exterior ring is CCW from above.
-    ext = list(poly.exterior.coords[:-1])   # drop closing duplicate
-    n = len(ext)
-    for i in range(n):
-        a = ext[i]
-        b = ext[(i + 1) % n]
-        # Top face: CCW → normal up
-        tris.append(((cx, cy, z_top), (a[0], a[1], z_top), (b[0], b[1], z_top)))
-        # Bottom face: reversed → normal down
-        tris.append(((cx, cy, z_bot), (b[0], b[1], z_bot), (a[0], a[1], z_bot)))
+    # --- Top and bottom faces via filtered Delaunay triangulation ---
+    # shapely.ops.triangulate is unconstrained (may produce triangles outside
+    # the polygon for concave shapes), so filter by centroid containment.
+    face_tris = [t for t in shp_triangulate(poly) if poly.contains(t.centroid)]
+    for tri in face_tris:
+        coords = list(tri.exterior.coords[:3])   # 3 vertices
+        a, b, c = coords[0], coords[1], coords[2]
+        # Top face: preserve winding → normal up
+        tris.append(((a[0], a[1], z_top), (b[0], b[1], z_top), (c[0], c[1], z_top)))
+        # Bottom face: flip winding → normal down
+        tris.append(((a[0], a[1], z_bot), (c[0], c[1], z_bot), (b[0], b[1], z_bot)))
 
-    # Exterior side walls
-    for i in range(n):
-        a, b = ext[i], ext[(i + 1) % n]
-        tris.append(((a[0], a[1], z_bot), (a[0], a[1], z_top), (b[0], b[1], z_top)))
-        tris.append(((a[0], a[1], z_bot), (b[0], b[1], z_top), (b[0], b[1], z_bot)))
+    # --- Side walls for every ring (exterior + holes) ---
+    rings = [poly.exterior] + list(poly.interiors)
+    for ring in rings:
+        coords = list(ring.coords[:-1])   # drop closing duplicate
+        n = len(coords)
+        for i in range(n):
+            a, b = coords[i], coords[(i + 1) % n]
+            tris.append(((a[0], a[1], z_bot), (a[0], a[1], z_top), (b[0], b[1], z_top)))
+            tris.append(((a[0], a[1], z_bot), (b[0], b[1], z_top), (b[0], b[1], z_bot)))
 
     return tris
 

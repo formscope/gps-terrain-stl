@@ -573,25 +573,24 @@
         statusEl.className = 'status success';
         statusEl.innerHTML = '<span class="message">STL generated! Loading 3D preview...</span>';
 
-        // Extract the combined STL from the ZIP for the 3D viewer
-        const { JSZip } = await import('https://cdn.jsdelivr.net/npm/jszip@3.10.1/+esm');
+        // Extract all STL files from the ZIP and merge for the 3D viewer
+        const JSZipModule = await import('https://cdn.jsdelivr.net/npm/jszip@3.10.1/+esm');
+        const JSZip = JSZipModule.default || JSZipModule;
         const zip = await JSZip.loadAsync(blob);
-        // Find the combined STL (the one without _terrain/_track/_water suffix)
-        let combinedEntry = null;
+
+        const stlBuffers = [];
+        const stlNames = [];
         zip.forEach((path, entry) => {
-          if (path.endsWith('.stl') && !path.includes('_terrain') && !path.includes('_track') && !path.includes('_water')) {
-            combinedEntry = entry;
+          if (path.endsWith('.stl')) {
+            stlNames.push(path);
           }
         });
-        // Fallback to first STL if combined not found
-        if (!combinedEntry) {
-          zip.forEach((path, entry) => {
-            if (path.endsWith('.stl') && !combinedEntry) combinedEntry = entry;
-          });
+        for (const name of stlNames) {
+          const buf = await zip.file(name).async('arraybuffer');
+          stlBuffers.push(buf);
         }
-        if (combinedEntry) {
-          const arrayBuffer = await combinedEntry.async('arraybuffer');
-          showSTL(arrayBuffer);
+        if (stlBuffers.length > 0) {
+          showSTLMultiple(stlBuffers);
         }
 
         viewerWrapper.classList.add('visible');
@@ -614,7 +613,8 @@
     const container = document.getElementById('viewer-container');
     const hint = document.getElementById('viewer-hint');
 
-    let renderer, scene, camera, controls, currentMesh;
+    let renderer, scene, camera, controls;
+    let currentMesh = null;  // array of meshes
     let animId = null;
     let initialized = false;
 
@@ -677,36 +677,52 @@
       renderer.render(scene, camera);
     }
 
-    window.showSTL = function(arrayBuffer) {
+    // Colors for terrain, track, water (matched by filename suffix order)
+    const partColors = {
+      terrain: 0xb0b8c8,
+      track:   0xff6644,
+      water:   0x4499dd,
+    };
+
+    window.showSTLMultiple = function(arrayBuffers) {
       initViewer();
 
-      // Remove previous mesh
+      // Remove previous meshes
       if (currentMesh) {
-        scene.remove(currentMesh);
-        currentMesh.geometry.dispose();
-        currentMesh.material.dispose();
+        currentMesh.forEach(m => {
+          scene.remove(m);
+          m.geometry.dispose();
+          m.material.dispose();
+        });
       }
+      currentMesh = [];
 
       const loader = new STLLoader();
-      const geometry = loader.parse(arrayBuffer);
-      geometry.computeVertexNormals();
+      const group = new THREE.Group();
+      const partKeys = ['terrain', 'track', 'water'];
 
-      const material = new THREE.MeshStandardMaterial({
-        color: 0xb0b8c8,
-        metalness: 0.1,
-        roughness: 0.65,
-        flatShading: false,
+      arrayBuffers.forEach((buf, i) => {
+        const geometry = loader.parse(buf);
+        geometry.computeVertexNormals();
+        const key = partKeys[i] || 'terrain';
+        const material = new THREE.MeshStandardMaterial({
+          color: partColors[key],
+          metalness: 0.1,
+          roughness: 0.65,
+          flatShading: false,
+        });
+        const mesh = new THREE.Mesh(geometry, material);
+        group.add(mesh);
+        currentMesh.push(mesh);
       });
 
-      currentMesh = new THREE.Mesh(geometry, material);
-      scene.add(currentMesh);
+      scene.add(group);
 
-      // Centre and fit camera
-      geometry.computeBoundingBox();
-      const box = geometry.boundingBox;
+      // Centre and fit camera on the whole group
+      const box = new THREE.Box3().setFromObject(group);
       const center = new THREE.Vector3();
       box.getCenter(center);
-      currentMesh.position.sub(center);
+      group.position.sub(center);
 
       const size = new THREE.Vector3();
       box.getSize(size);
@@ -716,8 +732,12 @@
       controls.target.set(0, 0, 0);
       controls.update();
 
-      // Reset hint
       hint.style.opacity = '1';
+    };
+
+    // Backward compat for single STL
+    window.showSTL = function(arrayBuffer) {
+      window.showSTLMultiple([arrayBuffer]);
     };
   </script>
 </body>

@@ -107,18 +107,16 @@ def generate():
             shape=shape,
         )
 
-        # Collect all generated STL files into a ZIP
+        # Collect the separate STL part files into a ZIP (only STL files)
         stl_base = os.path.splitext(input_path)[0]
-        stl_files = sorted(glob.glob(f"{stl_base}*.stl"))
+        part_suffixes = ["_terrain", "_track", "_water"]
+        stl_files = [f"{stl_base}{s}.stl" for s in part_suffixes
+                      if os.path.exists(f"{stl_base}{s}.stl")]
 
         buf = io.BytesIO()
         with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
             for stl_path in stl_files:
-                # Use clean filenames: base_terrain.stl, base_track.stl, etc.
-                arcname = os.path.basename(stl_path).replace(
-                    os.path.splitext(f.filename)[0],
-                    base_name,
-                )
+                arcname = base_name + os.path.basename(stl_path)[len(os.path.basename(stl_base)):]
                 zf.write(stl_path, arcname)
         buf.seek(0)
 

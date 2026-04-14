@@ -54,10 +54,12 @@ def build_and_export(
     N = len(x_coords)
     lin = np.linspace(-radius_mm, radius_mm, N)
     Xm, Ym = np.meshgrid(lin, lin[::-1])   # row 0 = north
+    pixel_size_mm = 2.0 * radius_mm / N
 
     E_grid = ce + Xm / scale_xy
     N_grid = cn + Ym / scale_xy
-    inside = np.hypot(Xm, Ym) <= radius_mm
+    # Shrink mask by one pixel so the grid sits fully inside the smooth ring
+    inside = np.hypot(Xm, Ym) <= (radius_mm - pixel_size_mm)
 
     query_pts = np.stack([N_grid[inside], E_grid[inside]], axis=1)
     elev_vals = interp(query_pts)
@@ -232,10 +234,57 @@ def build_and_export(
             pass
 
     # ------------------------------------------------------------------
-    # 3. Terrain top-surface triangles
-    #    Quad: TL=(row,col)  TR=(row,col+1)
-    #          BL=(row+1,col) BR=(row+1,col+1)
-    #    Upward normal: (TL,BL,BR) and (TL,BR,TR)
+    # 3. Smooth circular boundary ring
+    # ------------------------------------------------------------------
+    N_ring = max(720, N * 2)
+    angles = np.linspace(0, 2 * np.pi, N_ring, endpoint=False)
+    ring_x = radius_mm * np.cos(angles)
+    ring_y = radius_mm * np.sin(angles)
+
+    # Interpolate elevation at ring vertices
+    ring_E = ce + ring_x / scale_xy
+    ring_N = cn + ring_y / scale_xy
+    ring_elev = interp(np.stack([ring_N, ring_E], axis=1))
+    ring_elev = np.where(np.isnan(ring_elev), elev_min, ring_elev)
+    ring_z = (ring_elev - elev_min) * scale_z + base_height_mm
+
+    # Apply groove carving to ring vertices near the track
+    if tx is not None and basis_level is not None:
+        groove_hw2 = (track_width_mm / 2.0 + track_tolerance_mm) ** 2
+        tx_d, ty_d = _densify_track(tx, ty, pixel_size_mm * 0.5)
+        for ri in range(N_ring):
+            rx, ry = float(ring_x[ri]), float(ring_y[ri])
+            min_d2 = np.inf
+            for k in range(len(tx_d) - 1):
+                ax, ay = float(tx_d[k]), float(ty_d[k])
+                bx, by = float(tx_d[k + 1]), float(ty_d[k + 1])
+                dx, dy = bx - ax, by - ay
+                seg2 = dx * dx + dy * dy
+                if seg2 < 1e-12:
+                    d2 = (rx - ax) ** 2 + (ry - ay) ** 2
+                else:
+                    t = max(0.0, min(1.0, ((rx - ax) * dx + (ry - ay) * dy) / seg2))
+                    d2 = (rx - (ax + t * dx)) ** 2 + (ry - (ay + t * dy)) ** 2
+                if d2 < min_d2:
+                    min_d2 = d2
+            if min_d2 < groove_hw2 and ring_z[ri] > basis_level:
+                ring_z[ri] = basis_level
+
+    # Also carve ring for water polygons
+    if water_parts_ms:
+        try:
+            import shapely as shp
+            for part, _z_top, z_bot in water_parts_ms:
+                carved = part.buffer(track_tolerance_mm)
+                ring_inside_water = shp.contains_xy(carved, ring_x, ring_y)
+                ring_z = np.where(ring_inside_water & (ring_z > z_bot), z_bot, ring_z)
+        except Exception:
+            pass
+
+    ring_verts_top = list(zip(ring_x.tolist(), ring_y.tolist(), ring_z.tolist()))
+
+    # ------------------------------------------------------------------
+    # 4. Terrain top-surface triangles (interior grid)
     # ------------------------------------------------------------------
     triangles = []
 
@@ -252,57 +301,101 @@ def build_and_export(
             triangles.append((tl, br, tr))
 
     # ------------------------------------------------------------------
-    # 4. Side walls
+    # 5. Stitch smooth ring to inner grid boundary
     # ------------------------------------------------------------------
+    # Collect grid boundary vertices (outermost valid vertices)
     def quad_valid(r, c):
         if r < 0 or c < 0 or r >= N - 1 or c >= N - 1:
             return False
         return (not np.isnan(Zm[r, c]) and not np.isnan(Zm[r, c + 1])
                 and not np.isnan(Zm[r + 1, c]) and not np.isnan(Zm[r + 1, c + 1]))
 
-    boundary_edges = []
+    boundary_verts_set: set[tuple[int, int]] = set()
     for row in range(N - 1):
         for col in range(N - 1):
             if not quad_valid(row, col):
                 continue
-            if not quad_valid(row - 1, col):
-                boundary_edges.append((v(row, col), v(row, col + 1)))
-            if not quad_valid(row + 1, col):
-                boundary_edges.append((v(row + 1, col + 1), v(row + 1, col)))
-            if not quad_valid(row, col - 1):
-                boundary_edges.append((v(row + 1, col), v(row, col)))
-            if not quad_valid(row, col + 1):
-                boundary_edges.append((v(row, col + 1), v(row + 1, col + 1)))
+            for dr, dc in ((-1, 0), (1, 0), (0, -1), (0, 1)):
+                if not quad_valid(row + dr, col + dc):
+                    # This quad is on the boundary
+                    for r2 in (row, row + 1):
+                        for c2 in (col, col + 1):
+                            if not np.isnan(Zm[r2, c2]):
+                                boundary_verts_set.add((r2, c2))
+                    break
 
-    for (ax, ay, az), (bx, by, bz) in boundary_edges:
-        a_bot = (ax, ay, 0.0)
-        b_bot = (bx, by, 0.0)
-        triangles.append(((ax, ay, az), (bx, by, bz), b_bot))
-        triangles.append(((ax, ay, az), b_bot, a_bot))
+    bv_list = list(boundary_verts_set)
+    bv_xy = np.array([(float(Xm[r, c]), float(Ym[r, c])) for r, c in bv_list])
+    bv_z = np.array([float(Zm[r, c]) for r, c in bv_list])
+    bv_angles = np.arctan2(bv_xy[:, 1], bv_xy[:, 0])
+
+    # Stitch: for each pair of consecutive ring vertices, find the nearest
+    # grid boundary vertex and triangulate the gap.
+    # Strategy: merge ring + boundary verts, Delaunay triangulate the annulus.
+    from scipy.spatial import Delaunay
+
+    all_xy = np.vstack([
+        np.column_stack([ring_x, ring_y]),
+        bv_xy,
+    ])
+    all_z = np.concatenate([ring_z, bv_z])
+    n_ring_pts = N_ring
+    n_bv = len(bv_list)
+
+    # Mark: ring verts are indices [0, N_ring), boundary verts are [N_ring, N_ring+n_bv)
+    is_ring = np.zeros(len(all_xy), dtype=bool)
+    is_ring[:n_ring_pts] = True
+
+    tri_dt = Delaunay(all_xy)
+
+    # Keep only triangles that span the annular gap (have both ring and grid verts)
+    # and lie inside the disc
+    for simplex in tri_dt.simplices:
+        has_ring = any(is_ring[i] for i in simplex)
+        has_grid = any(not is_ring[i] for i in simplex)
+        if not (has_ring and has_grid):
+            continue
+        # Check centroid is inside disc
+        cx = all_xy[simplex, 0].mean()
+        cy = all_xy[simplex, 1].mean()
+        if np.hypot(cx, cy) > radius_mm * 1.01:
+            continue
+        i0, i1, i2 = simplex
+        v0 = (float(all_xy[i0, 0]), float(all_xy[i0, 1]), float(all_z[i0]))
+        v1 = (float(all_xy[i1, 0]), float(all_xy[i1, 1]), float(all_z[i1]))
+        v2 = (float(all_xy[i2, 0]), float(all_xy[i2, 1]), float(all_z[i2]))
+        # Ensure outward (upward) normal via CCW winding
+        cross = (v1[0]-v0[0])*(v2[1]-v0[1]) - (v1[1]-v0[1])*(v2[0]-v0[0])
+        if cross < 0:
+            v1, v2 = v2, v1
+        triangles.append((v0, v1, v2))
 
     # ------------------------------------------------------------------
-    # 5. Bottom face
+    # 6. Smooth side walls (ring top → z=0)
     # ------------------------------------------------------------------
-    seen: set[tuple] = set()
-    bottom_ring: list[tuple] = []
-    for (ax, ay, _), (bx, by, _) in boundary_edges:
-        for px, py in ((ax, ay), (bx, by)):
-            key = (round(px, 3), round(py, 3))
-            if key not in seen:
-                seen.add(key)
-                bottom_ring.append((px, py, 0.0))
+    for i in range(N_ring):
+        j = (i + 1) % N_ring
+        a_top = ring_verts_top[i]
+        b_top = ring_verts_top[j]
+        a_bot = (a_top[0], a_top[1], 0.0)
+        b_bot = (b_top[0], b_top[1], 0.0)
+        triangles.append((a_top, b_bot, b_top))
+        triangles.append((a_top, a_bot, b_bot))
 
-    bottom_ring.sort(key=lambda p: np.arctan2(p[1], p[0]))
+    # ------------------------------------------------------------------
+    # 7. Smooth bottom face (fan from centre)
+    # ------------------------------------------------------------------
     cbot = (0.0, 0.0, 0.0)
-    for i in range(len(bottom_ring)):
-        a = bottom_ring[i]
-        b = bottom_ring[(i + 1) % len(bottom_ring)]
+    for i in range(N_ring):
+        j = (i + 1) % N_ring
+        a = (ring_verts_top[i][0], ring_verts_top[i][1], 0.0)
+        b = (ring_verts_top[j][0], ring_verts_top[j][1], 0.0)
         triangles.append((cbot, b, a))
 
     terrain_count = len(triangles)
 
     # ------------------------------------------------------------------
-    # 6. Track tube
+    # 8. Track tube
     # ------------------------------------------------------------------
     if track_lv95 and tx is not None:
         track_tris = _build_track_tube(
@@ -312,7 +405,7 @@ def build_and_export(
         print(f"  Track tube: {len(track_tris)} triangles")
 
     # ------------------------------------------------------------------
-    # 7. Water plates
+    # 9. Water plates
     # ------------------------------------------------------------------
     if water_parts_ms:
         water_tri_count = 0
@@ -323,12 +416,12 @@ def build_and_export(
         print(f"  Water plates: {water_tri_count} triangles")
 
     # ------------------------------------------------------------------
-    # 8. Remove small disconnected components (artifact filter)
+    # 10. Remove small disconnected components (artifact filter)
     # ------------------------------------------------------------------
     triangles = _remove_small_components(triangles, min_area_mm2=1.0)
 
     # ------------------------------------------------------------------
-    # 9. Export
+    # 11. Export
     # ------------------------------------------------------------------
     solid = stl_mesh.Mesh(np.zeros(len(triangles), dtype=stl_mesh.Mesh.dtype))
     for i, (v0, v1, v2) in enumerate(triangles):

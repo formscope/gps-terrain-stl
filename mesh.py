@@ -4,6 +4,80 @@ import numpy as np
 from scipy.interpolate import RegularGridInterpolator
 from stl import mesh as stl_mesh
 
+VALID_SHAPES = ("circle", "square", "hexagon")
+
+
+def _generate_shape_ring(shape: str, radius_mm: float, N: int):
+    """
+    Return (ring_x, ring_y, inside_mask_func) for the given shape.
+
+    ring_x, ring_y: 1-D arrays of boundary vertices (closed smooth ring).
+    inside_func(Xm, Ym, shrink) -> bool mask: True where grid point is inside shape.
+    """
+    if shape == "circle":
+        N_ring = max(720, N * 2)
+        angles = np.linspace(0, 2 * np.pi, N_ring, endpoint=False)
+        ring_x = radius_mm * np.cos(angles)
+        ring_y = radius_mm * np.sin(angles)
+
+        def inside_func(Xm, Ym, shrink):
+            return np.hypot(Xm, Ym) <= (radius_mm - shrink)
+
+    elif shape == "square":
+        # Square with side = diameter, corners at +-radius_mm
+        # Smooth edges: many points per side for consistent stitching
+        pts_per_side = max(180, N // 2)
+        ring_x_list, ring_y_list = [], []
+        r = radius_mm
+        # bottom edge: left to right
+        ring_x_list.extend(np.linspace(-r, r, pts_per_side, endpoint=False))
+        ring_y_list.extend(np.full(pts_per_side, -r))
+        # right edge: bottom to top
+        ring_x_list.extend(np.full(pts_per_side, r))
+        ring_y_list.extend(np.linspace(-r, r, pts_per_side, endpoint=False))
+        # top edge: right to left
+        ring_x_list.extend(np.linspace(r, -r, pts_per_side, endpoint=False))
+        ring_y_list.extend(np.full(pts_per_side, r))
+        # left edge: top to bottom
+        ring_x_list.extend(np.full(pts_per_side, -r))
+        ring_y_list.extend(np.linspace(r, -r, pts_per_side, endpoint=False))
+        ring_x = np.array(ring_x_list)
+        ring_y = np.array(ring_y_list)
+
+        def inside_func(Xm, Ym, shrink):
+            return (np.abs(Xm) <= (r - shrink)) & (np.abs(Ym) <= (r - shrink))
+
+    elif shape == "hexagon":
+        # Regular hexagon (flat-top): 6 corners, many interpolated edge points
+        pts_per_edge = max(120, N // 3)
+        hex_angles = np.linspace(0, 2 * np.pi, 7)  # 6 corners + wrap
+        corners_x = radius_mm * np.cos(hex_angles)
+        corners_y = radius_mm * np.sin(hex_angles)
+        ring_x_list, ring_y_list = [], []
+        for i in range(6):
+            xs = np.linspace(corners_x[i], corners_x[i + 1], pts_per_edge, endpoint=False)
+            ys = np.linspace(corners_y[i], corners_y[i + 1], pts_per_edge, endpoint=False)
+            ring_x_list.extend(xs)
+            ring_y_list.extend(ys)
+        ring_x = np.array(ring_x_list)
+        ring_y = np.array(ring_y_list)
+
+        def inside_func(Xm, Ym, shrink):
+            # A point is inside a regular hexagon if the max of three
+            # projected distances is <= radius.
+            # For a flat-top hexagon at origin with circumradius R:
+            #   |x| <= R, |x/2 + y*sqrt(3)/2| <= R, |x/2 - y*sqrt(3)/2| <= R
+            R = radius_mm - shrink
+            d1 = np.abs(Xm)
+            d2 = np.abs(Xm * 0.5 + Ym * (np.sqrt(3) / 2))
+            d3 = np.abs(Xm * 0.5 - Ym * (np.sqrt(3) / 2))
+            return (d1 <= R) & (d2 <= R) & (d3 <= R)
+
+    else:
+        raise ValueError(f"Unknown shape '{shape}'. Use one of {VALID_SHAPES}")
+
+    return ring_x, ring_y, inside_func
+
 
 def build_and_export(
     elevation: np.ndarray,
@@ -21,11 +95,13 @@ def build_and_export(
     track_intrude_mm: float = 2.0,
     track_tolerance_mm: float = 0.2,
     water_polys_lv95: list | None = None,
+    shape: str = "circle",
 ) -> None:
     """
-    Build a solid circular terrain STL plus a track-tube body.
+    Build a solid terrain STL plus a track-tube body.
 
-    The terrain disc is centred at (0,0), radius = diameter_mm/2.
+    The terrain is centred at (0,0), radius = diameter_mm/2.
+    Shape can be 'circle', 'square', or 'hexagon'.
     A groove is carved into the terrain along the track path with width
     (track_width + 2*tolerance) down to basis_level, so the track tube
     fits without intersection.
@@ -49,7 +125,7 @@ def build_and_export(
     )
 
     # ------------------------------------------------------------------
-    # 2. NxN model-space grid, circle-masked
+    # 2. NxN model-space grid, shape-masked
     # ------------------------------------------------------------------
     N = len(x_coords)
     lin = np.linspace(-radius_mm, radius_mm, N)
@@ -58,8 +134,11 @@ def build_and_export(
 
     E_grid = ce + Xm / scale_xy
     N_grid = cn + Ym / scale_xy
-    # Shrink mask by one pixel so the grid sits fully inside the smooth ring
-    inside = np.hypot(Xm, Ym) <= (radius_mm - pixel_size_mm)
+
+    ring_x, ring_y, inside_func = _generate_shape_ring(shape, radius_mm, N)
+    N_ring = len(ring_x)
+    # Shrink mask by one pixel so the grid sits fully inside the boundary ring
+    inside = inside_func(Xm, Ym, pixel_size_mm)
 
     query_pts = np.stack([N_grid[inside], E_grid[inside]], axis=1)
     elev_vals = interp(query_pts)
@@ -152,7 +231,12 @@ def build_and_export(
                 MultiPolygon as SMultiPolygon, LineString as SLineString
             from shapely.ops import unary_union
 
-            disc_shape = SPoint(0.0, 0.0).buffer(radius_mm)
+            # Build disc shape matching the selected form
+            disc_ring_coords = list(zip(ring_x.tolist(), ring_y.tolist()))
+            disc_ring_coords.append(disc_ring_coords[0])  # close the ring
+            disc_shape = SPolygon(disc_ring_coords)
+            if not disc_shape.is_valid:
+                disc_shape = disc_shape.buffer(0)
             plate_thickness = 1.0
 
             # Build track buffer in model space for subtracting from water plates.
@@ -234,12 +318,9 @@ def build_and_export(
             pass
 
     # ------------------------------------------------------------------
-    # 3. Smooth circular boundary ring
+    # 3. Smooth boundary ring (shape-dependent, generated in section 2)
     # ------------------------------------------------------------------
-    N_ring = max(720, N * 2)
-    angles = np.linspace(0, 2 * np.pi, N_ring, endpoint=False)
-    ring_x = radius_mm * np.cos(angles)
-    ring_y = radius_mm * np.sin(angles)
+    # ring_x, ring_y, N_ring already set by _generate_shape_ring()
 
     # Interpolate elevation at ring vertices
     ring_E = ce + ring_x / scale_xy

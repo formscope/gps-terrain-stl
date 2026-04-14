@@ -50,6 +50,9 @@ def generate():
     min_water_area = float(request.form.get("min_water_area", 500000))
     rivers = request.form.get("rivers") == "on"
     no_water = request.form.get("no_water") == "on"
+    shape = request.form.get("shape", "circle")
+    if shape not in ("circle", "square", "hexagon"):
+        shape = "circle"
 
     # Save uploaded file to temp dir
     tmp_dir = tempfile.mkdtemp()
@@ -102,6 +105,7 @@ def generate():
             track_intrude_mm=track_intrude,
             track_tolerance_mm=track_tolerance,
             water_polys_lv95=water_polys,
+            shape=shape,
         )
 
         # Send STL file as download

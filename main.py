@@ -50,6 +50,9 @@ def main():
                         help="Include rivers and riverbanks as water plates (disabled by default)")
     parser.add_argument("--no-water", action="store_true",
                         help="Skip water body detection and plates")
+    parser.add_argument("--shape", choices=["circle", "square", "hexagon"],
+                        default="circle",
+                        help="Shape of the terrain disc (circle, square, or hexagon)")
     args = parser.parse_args()
 
     if args.output is None:
@@ -110,6 +113,7 @@ def main():
         track_intrude_mm=args.track_intrude,
         track_tolerance_mm=args.track_tolerance,
         water_polys_lv95=water_polys,
+        shape=args.shape,
     )
     print("Done.")
 

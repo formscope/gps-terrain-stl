@@ -81,6 +81,62 @@
 
     #file-input { display: none; }
 
+    /* Shape selector */
+    .shape-selector {
+      display: flex;
+      gap: 12px;
+      margin-bottom: 28px;
+    }
+
+    .shape-option {
+      flex: 1;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 8px;
+      padding: 16px 12px;
+      background: #161822;
+      border: 2px solid #2a2d3a;
+      border-radius: 10px;
+      cursor: pointer;
+      transition: border-color 0.2s, background 0.2s;
+    }
+
+    .shape-option:hover {
+      border-color: #4f8fff;
+      background: #1a1f33;
+    }
+
+    .shape-option.active {
+      border-color: #4f8fff;
+      background: #1a2540;
+    }
+
+    .shape-option input[type="radio"] { display: none; }
+
+    .shape-option svg {
+      width: 40px;
+      height: 40px;
+      fill: none;
+      stroke: #888;
+      stroke-width: 2;
+      transition: stroke 0.2s;
+    }
+
+    .shape-option.active svg {
+      stroke: #4f8fff;
+    }
+
+    .shape-option span {
+      font-size: 0.85rem;
+      color: #888;
+      transition: color 0.2s;
+    }
+
+    .shape-option.active span {
+      color: #e0e0e0;
+    }
+
     /* Sections */
     .section {
       margin-bottom: 28px;
@@ -239,6 +295,28 @@
         <input type="file" id="file-input" name="gpx_file" accept=".gpx,.igc">
       </div>
 
+      <!-- Shape Selector -->
+      <div class="section">
+        <div class="section-title">Shape</div>
+        <div class="shape-selector">
+          <label class="shape-option active" data-shape="circle">
+            <input type="radio" name="shape" value="circle" checked>
+            <svg viewBox="0 0 40 40"><circle cx="20" cy="20" r="16"/></svg>
+            <span>Circle</span>
+          </label>
+          <label class="shape-option" data-shape="square">
+            <input type="radio" name="shape" value="square">
+            <svg viewBox="0 0 40 40"><rect x="4" y="4" width="32" height="32" rx="1"/></svg>
+            <span>Square</span>
+          </label>
+          <label class="shape-option" data-shape="hexagon">
+            <input type="radio" name="shape" value="hexagon">
+            <svg viewBox="0 0 40 40"><polygon points="20,2 36,11 36,29 20,38 4,29 4,11"/></svg>
+            <span>Hexagon</span>
+          </label>
+        </div>
+      </div>
+
       <!-- Disc Settings -->
       <div class="section">
         <div class="section-title">Disc Settings</div>
@@ -357,6 +435,15 @@
     });
 
     fileInput.addEventListener('change', onFileSelected);
+
+    // Shape selector
+    document.querySelectorAll('.shape-option').forEach(opt => {
+      opt.addEventListener('click', () => {
+        document.querySelectorAll('.shape-option').forEach(o => o.classList.remove('active'));
+        opt.classList.add('active');
+        opt.querySelector('input[type="radio"]').checked = true;
+      });
+    });
 
     function onFileSelected() {
       const file = fileInput.files[0];

@@ -4,6 +4,14 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>GPS Terrain STL Generator</title>
+  <script type="importmap">
+  {
+    "imports": {
+      "three": "https://cdn.jsdelivr.net/npm/three@0.170.0/build/three.module.js",
+      "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.170.0/examples/jsm/"
+    }
+  }
+  </script>
   <style>
     * { box-sizing: border-box; margin: 0; padding: 0; }
 
@@ -276,6 +284,65 @@
 
     .status.error .message { color: #f87171; }
     .status.success .message { color: #34d399; }
+
+    /* 3D Viewer */
+    .viewer-wrapper {
+      display: none;
+      margin-top: 28px;
+    }
+
+    .viewer-wrapper.visible {
+      display: block;
+    }
+
+    .viewer-container {
+      width: 100%;
+      aspect-ratio: 4 / 3;
+      border-radius: 12px;
+      overflow: hidden;
+      border: 1px solid #2a2d3a;
+      background: #1a1c2a;
+      position: relative;
+    }
+
+    .viewer-container canvas {
+      width: 100% !important;
+      height: 100% !important;
+      display: block;
+    }
+
+    .viewer-hint {
+      position: absolute;
+      bottom: 12px;
+      left: 50%;
+      transform: translateX(-50%);
+      font-size: 0.75rem;
+      color: #555;
+      pointer-events: none;
+      transition: opacity 0.5s;
+    }
+
+    .download-btn {
+      width: 100%;
+      padding: 14px;
+      background: #34d399;
+      color: #0f1117;
+      font-size: 1rem;
+      font-weight: 600;
+      border: none;
+      border-radius: 10px;
+      cursor: pointer;
+      transition: background 0.2s, transform 0.1s;
+      margin-top: 12px;
+    }
+
+    .download-btn:hover {
+      background: #2ab383;
+    }
+
+    .download-btn:active {
+      transform: scale(0.99);
+    }
   </style>
 </head>
 <body>
@@ -404,6 +471,15 @@
     </form>
 
     <div class="status" id="status"></div>
+
+    <!-- 3D Viewer -->
+    <div class="viewer-wrapper" id="viewer-wrapper">
+      <div class="section-title" style="margin-top: 8px;">3D Preview</div>
+      <div class="viewer-container" id="viewer-container">
+        <div class="viewer-hint" id="viewer-hint">Drag to rotate &middot; Scroll to zoom</div>
+      </div>
+      <button class="download-btn" id="download-btn">Download STL</button>
+    </div>
   </div>
 
   <script>
@@ -413,6 +489,11 @@
     const form = document.getElementById('gen-form');
     const btn = document.getElementById('generate-btn');
     const statusEl = document.getElementById('status');
+    const viewerWrapper = document.getElementById('viewer-wrapper');
+    const downloadBtn = document.getElementById('download-btn');
+
+    let lastBlobUrl = null;
+    let lastFilename = 'terrain.stl';
 
     // Click to browse
     uploadArea.addEventListener('click', () => fileInput.click());
@@ -454,10 +535,20 @@
       }
     }
 
+    // Download button
+    downloadBtn.addEventListener('click', () => {
+      if (!lastBlobUrl) return;
+      const a = document.createElement('a');
+      a.href = lastBlobUrl;
+      a.download = lastFilename;
+      a.click();
+    });
+
     // Submit
     form.addEventListener('submit', async e => {
       e.preventDefault();
       btn.disabled = true;
+      viewerWrapper.classList.remove('visible');
       statusEl.className = 'status';
       statusEl.innerHTML = '<span class="spinner"></span><span class="message">Generating terrain model... This may take a minute.</span>';
 
@@ -471,19 +562,23 @@
           throw new Error(data.error || 'Generation failed');
         }
 
-        // Download the file
         const blob = await resp.blob();
-        const url = URL.createObjectURL(blob);
-        const a = document.createElement('a');
+        if (lastBlobUrl) URL.revokeObjectURL(lastBlobUrl);
+        lastBlobUrl = URL.createObjectURL(blob);
+
         const disposition = resp.headers.get('Content-Disposition') || '';
         const match = disposition.match(/filename="?(.+?)"?$/);
-        a.download = match ? match[1] : 'terrain.stl';
-        a.href = url;
-        a.click();
-        URL.revokeObjectURL(url);
+        lastFilename = match ? match[1] : 'terrain.stl';
 
         statusEl.className = 'status success';
-        statusEl.innerHTML = '<span class="message">STL generated and downloaded successfully!</span>';
+        statusEl.innerHTML = '<span class="message">STL generated! Loading 3D preview...</span>';
+
+        // Load and display in 3D viewer
+        const arrayBuffer = await blob.arrayBuffer();
+        showSTL(arrayBuffer);
+
+        viewerWrapper.classList.add('visible');
+        statusEl.innerHTML = '<span class="message">Done! Rotate the model below, then download.</span>';
       } catch (err) {
         statusEl.className = 'status error';
         statusEl.innerHTML = `<span class="message">Error: ${err.message}</span>`;
@@ -491,6 +586,122 @@
         btn.disabled = false;
       }
     });
+  </script>
+
+  <!-- Three.js 3D Viewer (ES module) -->
+  <script type="module">
+    import * as THREE from 'three';
+    import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+    import { STLLoader } from 'three/addons/loaders/STLLoader.js';
+
+    const container = document.getElementById('viewer-container');
+    const hint = document.getElementById('viewer-hint');
+
+    let renderer, scene, camera, controls, currentMesh;
+    let animId = null;
+    let initialized = false;
+
+    function initViewer() {
+      if (initialized) return;
+      initialized = true;
+
+      scene = new THREE.Scene();
+      scene.background = new THREE.Color(0x1a1c2a);
+
+      renderer = new THREE.WebGLRenderer({ antialias: true });
+      renderer.setPixelRatio(window.devicePixelRatio);
+      renderer.setSize(container.clientWidth, container.clientHeight);
+      renderer.toneMapping = THREE.ACESFilmicToneMapping;
+      renderer.toneMappingExposure = 1.0;
+      container.appendChild(renderer.domElement);
+
+      camera = new THREE.PerspectiveCamera(45, container.clientWidth / container.clientHeight, 0.1, 10000);
+
+      controls = new OrbitControls(camera, renderer.domElement);
+      controls.enableDamping = true;
+      controls.dampingFactor = 0.08;
+      controls.rotateSpeed = 0.8;
+      controls.minDistance = 10;
+      controls.maxDistance = 2000;
+
+      // Lighting
+      const ambientLight = new THREE.AmbientLight(0xffffff, 0.4);
+      scene.add(ambientLight);
+
+      const dirLight1 = new THREE.DirectionalLight(0xffffff, 0.8);
+      dirLight1.position.set(1, 2, 1.5);
+      scene.add(dirLight1);
+
+      const dirLight2 = new THREE.DirectionalLight(0x8899bb, 0.3);
+      dirLight2.position.set(-1, 0.5, -1);
+      scene.add(dirLight2);
+
+      // Hide hint after first interaction
+      controls.addEventListener('start', () => {
+        hint.style.opacity = '0';
+      });
+
+      // Resize
+      const ro = new ResizeObserver(() => {
+        const w = container.clientWidth;
+        const h = container.clientHeight;
+        camera.aspect = w / h;
+        camera.updateProjectionMatrix();
+        renderer.setSize(w, h);
+      });
+      ro.observe(container);
+
+      animate();
+    }
+
+    function animate() {
+      animId = requestAnimationFrame(animate);
+      controls.update();
+      renderer.render(scene, camera);
+    }
+
+    window.showSTL = function(arrayBuffer) {
+      initViewer();
+
+      // Remove previous mesh
+      if (currentMesh) {
+        scene.remove(currentMesh);
+        currentMesh.geometry.dispose();
+        currentMesh.material.dispose();
+      }
+
+      const loader = new STLLoader();
+      const geometry = loader.parse(arrayBuffer);
+      geometry.computeVertexNormals();
+
+      const material = new THREE.MeshStandardMaterial({
+        color: 0xb0b8c8,
+        metalness: 0.1,
+        roughness: 0.65,
+        flatShading: false,
+      });
+
+      currentMesh = new THREE.Mesh(geometry, material);
+      scene.add(currentMesh);
+
+      // Centre and fit camera
+      geometry.computeBoundingBox();
+      const box = geometry.boundingBox;
+      const center = new THREE.Vector3();
+      box.getCenter(center);
+      currentMesh.position.sub(center);
+
+      const size = new THREE.Vector3();
+      box.getSize(size);
+      const maxDim = Math.max(size.x, size.y, size.z);
+
+      camera.position.set(maxDim * 0.8, maxDim * 0.6, maxDim * 0.8);
+      controls.target.set(0, 0, 0);
+      controls.update();
+
+      // Reset hint
+      hint.style.opacity = '1';
+    };
   </script>
 </body>
 </html>

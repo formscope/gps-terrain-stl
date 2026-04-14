@@ -478,7 +478,7 @@
       <div class="viewer-container" id="viewer-container">
         <div class="viewer-hint" id="viewer-hint">Drag to rotate &middot; Scroll to zoom</div>
       </div>
-      <button class="download-btn" id="download-btn">Download STL</button>
+      <button class="download-btn" id="download-btn">Download ZIP (Terrain + Track + Water)</button>
     </div>
   </div>
 
@@ -568,17 +568,34 @@
 
         const disposition = resp.headers.get('Content-Disposition') || '';
         const match = disposition.match(/filename="?(.+?)"?$/);
-        lastFilename = match ? match[1] : 'terrain.stl';
+        lastFilename = match ? match[1] : 'terrain.zip';
 
         statusEl.className = 'status success';
         statusEl.innerHTML = '<span class="message">STL generated! Loading 3D preview...</span>';
 
-        // Load and display in 3D viewer
-        const arrayBuffer = await blob.arrayBuffer();
-        showSTL(arrayBuffer);
+        // Extract the combined STL from the ZIP for the 3D viewer
+        const { JSZip } = await import('https://cdn.jsdelivr.net/npm/jszip@3.10.1/+esm');
+        const zip = await JSZip.loadAsync(blob);
+        // Find the combined STL (the one without _terrain/_track/_water suffix)
+        let combinedEntry = null;
+        zip.forEach((path, entry) => {
+          if (path.endsWith('.stl') && !path.includes('_terrain') && !path.includes('_track') && !path.includes('_water')) {
+            combinedEntry = entry;
+          }
+        });
+        // Fallback to first STL if combined not found
+        if (!combinedEntry) {
+          zip.forEach((path, entry) => {
+            if (path.endsWith('.stl') && !combinedEntry) combinedEntry = entry;
+          });
+        }
+        if (combinedEntry) {
+          const arrayBuffer = await combinedEntry.async('arraybuffer');
+          showSTL(arrayBuffer);
+        }
 
         viewerWrapper.classList.add('visible');
-        statusEl.innerHTML = '<span class="message">Done! Rotate the model below, then download.</span>';
+        statusEl.innerHTML = '<span class="message">Done! Rotate the model below, then download the ZIP with separate parts.</span>';
       } catch (err) {
         statusEl.className = 'status error';
         statusEl.innerHTML = `<span class="message">Error: ${err.message}</span>`;

@@ -1,10 +1,11 @@
 """Flask web interface for gps-terrain-stl."""
 
+import glob
 import io
 import os
 import sys
 import tempfile
-import threading
+import zipfile
 
 from flask import Flask, render_template, request, send_file, jsonify
 
@@ -17,9 +18,6 @@ from mesh import build_and_export
 from water import fetch_water_bodies
 
 app = Flask(__name__)
-
-# Store generation progress per job
-progress = {}
 
 
 @app.route("/")
@@ -60,6 +58,7 @@ def generate():
     f.save(input_path)
 
     output_path = os.path.splitext(input_path)[0] + ".stl"
+    base_name = os.path.splitext(f.filename)[0]
 
     try:
         # Load track
@@ -88,7 +87,7 @@ def generate():
                 include_rivers=rivers,
             )
 
-        # Build mesh & export
+        # Build mesh & export (creates separate STL files)
         build_and_export(
             elevation=elevation,
             grid_info=grid_info,
@@ -108,9 +107,27 @@ def generate():
             shape=shape,
         )
 
-        # Send STL file as download
-        basename = os.path.splitext(f.filename)[0] + ".stl"
-        return send_file(output_path, as_attachment=True, download_name=basename)
+        # Collect all generated STL files into a ZIP
+        stl_base = os.path.splitext(input_path)[0]
+        stl_files = sorted(glob.glob(f"{stl_base}*.stl"))
+
+        buf = io.BytesIO()
+        with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
+            for stl_path in stl_files:
+                # Use clean filenames: base_terrain.stl, base_track.stl, etc.
+                arcname = os.path.basename(stl_path).replace(
+                    os.path.splitext(f.filename)[0],
+                    base_name,
+                )
+                zf.write(stl_path, arcname)
+        buf.seek(0)
+
+        return send_file(
+            buf,
+            as_attachment=True,
+            download_name=f"{base_name}.zip",
+            mimetype="application/zip",
+        )
 
     except Exception as e:
         return jsonify({"error": str(e)}), 500

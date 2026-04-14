@@ -1,5 +1,6 @@
 """Build a watertight 3D terrain mesh and export to STL."""
 
+import os
 import numpy as np
 from scipy.interpolate import RegularGridInterpolator
 from stl import mesh as stl_mesh
@@ -473,44 +474,65 @@ def build_and_export(
         b = (ring_verts_top[j][0], ring_verts_top[j][1], 0.0)
         triangles.append((cbot, b, a))
 
-    terrain_count = len(triangles)
+    terrain_tris = _remove_small_components(triangles, min_area_mm2=1.0)
+    print(f"  Terrain: {len(terrain_tris)} triangles")
 
     # ------------------------------------------------------------------
     # 8. Track tube
     # ------------------------------------------------------------------
+    track_tris = []
     if track_lv95 and tx is not None:
         track_tris = _build_track_tube(
             tx, ty, track_zm, track_width_mm, tube_raise, basis_level,
         )
-        triangles.extend(track_tris)
         print(f"  Track tube: {len(track_tris)} triangles")
 
     # ------------------------------------------------------------------
     # 9. Water plates
     # ------------------------------------------------------------------
+    water_tris = []
     if water_parts_ms:
-        water_tri_count = 0
         for part, z_top, z_bot in water_parts_ms:
             plate_tris = _build_water_plate(part, z_bot, z_top)
-            triangles.extend(plate_tris)
-            water_tri_count += len(plate_tris)
-        print(f"  Water plates: {water_tri_count} triangles")
+            water_tris.extend(plate_tris)
+        print(f"  Water plates: {len(water_tris)} triangles")
 
     # ------------------------------------------------------------------
-    # 10. Remove small disconnected components (artifact filter)
+    # 10. Export separate STL files
     # ------------------------------------------------------------------
-    triangles = _remove_small_components(triangles, min_area_mm2=1.0)
+    base, ext = os.path.splitext(output_path)
 
-    # ------------------------------------------------------------------
-    # 11. Export
-    # ------------------------------------------------------------------
-    solid = stl_mesh.Mesh(np.zeros(len(triangles), dtype=stl_mesh.Mesh.dtype))
-    for i, (v0, v1, v2) in enumerate(triangles):
-        solid.vectors[i] = [v0, v1, v2]
-    solid.update_normals()
-    solid.save(output_path)
-    print(f"  Total: {len(triangles)} triangles "
-          f"({terrain_count} terrain + {len(triangles) - terrain_count} track)")
+    def _save_stl(tris, path):
+        if not tris:
+            return
+        solid = stl_mesh.Mesh(np.zeros(len(tris), dtype=stl_mesh.Mesh.dtype))
+        for i, (v0, v1, v2) in enumerate(tris):
+            solid.vectors[i] = [v0, v1, v2]
+        solid.update_normals()
+        solid.save(path)
+
+    terrain_path = f"{base}_terrain{ext}"
+    track_path = f"{base}_track{ext}"
+    water_path = f"{base}_water{ext}"
+
+    _save_stl(terrain_tris, terrain_path)
+    print(f"  Saved: {terrain_path}")
+
+    if track_tris:
+        _save_stl(track_tris, track_path)
+        print(f"  Saved: {track_path}")
+
+    if water_tris:
+        _save_stl(water_tris, water_path)
+        print(f"  Saved: {water_path}")
+
+    # Also save combined STL for backward compatibility
+    all_tris = terrain_tris + track_tris + water_tris
+    _save_stl(all_tris, output_path)
+
+    total = len(all_tris)
+    print(f"  Total: {total} triangles "
+          f"({len(terrain_tris)} terrain + {len(track_tris)} track + {len(water_tris)} water)")
 
 
 # ------------------------------------------------------------------

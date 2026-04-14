@@ -1,0 +1,409 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>GPS Terrain STL Generator</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+      background: #0f1117;
+      color: #e0e0e0;
+      min-height: 100vh;
+      display: flex;
+      justify-content: center;
+      padding: 40px 20px;
+    }
+
+    .container {
+      width: 100%;
+      max-width: 720px;
+    }
+
+    h1 {
+      font-size: 1.8rem;
+      font-weight: 600;
+      margin-bottom: 8px;
+      color: #fff;
+    }
+
+    .subtitle {
+      color: #888;
+      margin-bottom: 32px;
+      font-size: 0.95rem;
+    }
+
+    /* Upload area */
+    .upload-area {
+      border: 2px dashed #333;
+      border-radius: 12px;
+      padding: 40px;
+      text-align: center;
+      cursor: pointer;
+      transition: border-color 0.2s, background 0.2s;
+      margin-bottom: 32px;
+      background: #161822;
+    }
+
+    .upload-area:hover, .upload-area.drag-over {
+      border-color: #4f8fff;
+      background: #1a1f33;
+    }
+
+    .upload-area.has-file {
+      border-color: #34d399;
+      background: #0f2922;
+    }
+
+    .upload-icon {
+      font-size: 2.5rem;
+      margin-bottom: 12px;
+      display: block;
+    }
+
+    .upload-text {
+      font-size: 1rem;
+      color: #999;
+    }
+
+    .upload-text strong {
+      color: #4f8fff;
+    }
+
+    .file-name {
+      color: #34d399;
+      font-weight: 500;
+      margin-top: 8px;
+      font-size: 0.95rem;
+    }
+
+    #file-input { display: none; }
+
+    /* Sections */
+    .section {
+      margin-bottom: 28px;
+    }
+
+    .section-title {
+      font-size: 0.85rem;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: 0.06em;
+      color: #666;
+      margin-bottom: 14px;
+      padding-bottom: 8px;
+      border-bottom: 1px solid #222;
+    }
+
+    /* Form grid */
+    .form-grid {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 16px;
+    }
+
+    .form-group {
+      display: flex;
+      flex-direction: column;
+    }
+
+    .form-group label {
+      font-size: 0.82rem;
+      color: #aaa;
+      margin-bottom: 6px;
+    }
+
+    .form-group input[type="number"] {
+      background: #161822;
+      border: 1px solid #2a2d3a;
+      border-radius: 8px;
+      padding: 10px 12px;
+      color: #e0e0e0;
+      font-size: 0.95rem;
+      outline: none;
+      transition: border-color 0.2s;
+    }
+
+    .form-group input[type="number"]:focus {
+      border-color: #4f8fff;
+    }
+
+    .form-group .unit {
+      font-size: 0.75rem;
+      color: #555;
+      margin-top: 3px;
+    }
+
+    /* Checkboxes */
+    .checkbox-row {
+      display: flex;
+      gap: 24px;
+      margin-top: 4px;
+    }
+
+    .checkbox-group {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      cursor: pointer;
+    }
+
+    .checkbox-group input[type="checkbox"] {
+      width: 18px;
+      height: 18px;
+      accent-color: #4f8fff;
+      cursor: pointer;
+    }
+
+    .checkbox-group label {
+      font-size: 0.9rem;
+      color: #ccc;
+      cursor: pointer;
+    }
+
+    /* Button */
+    .generate-btn {
+      width: 100%;
+      padding: 14px;
+      background: #4f8fff;
+      color: #fff;
+      font-size: 1rem;
+      font-weight: 600;
+      border: none;
+      border-radius: 10px;
+      cursor: pointer;
+      transition: background 0.2s, transform 0.1s;
+      margin-top: 8px;
+    }
+
+    .generate-btn:hover {
+      background: #3d7ae8;
+    }
+
+    .generate-btn:active {
+      transform: scale(0.99);
+    }
+
+    .generate-btn:disabled {
+      background: #2a3550;
+      color: #667;
+      cursor: not-allowed;
+    }
+
+    /* Status */
+    .status {
+      margin-top: 20px;
+      text-align: center;
+      min-height: 24px;
+    }
+
+    .status .spinner {
+      display: inline-block;
+      width: 20px;
+      height: 20px;
+      border: 2px solid #333;
+      border-top-color: #4f8fff;
+      border-radius: 50%;
+      animation: spin 0.8s linear infinite;
+      vertical-align: middle;
+      margin-right: 8px;
+    }
+
+    @keyframes spin { to { transform: rotate(360deg); } }
+
+    .status .message {
+      font-size: 0.9rem;
+      color: #999;
+    }
+
+    .status.error .message { color: #f87171; }
+    .status.success .message { color: #34d399; }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <h1>GPS Terrain STL</h1>
+    <p class="subtitle">Upload a GPX or IGC track to generate a 3D-printable terrain model.</p>
+
+    <form id="gen-form" enctype="multipart/form-data">
+      <!-- File Upload -->
+      <div class="upload-area" id="upload-area">
+        <span class="upload-icon">&#x1F3D4;</span>
+        <div class="upload-text">
+          Drag &amp; drop your <strong>.gpx</strong> or <strong>.igc</strong> file here<br>
+          or click to browse
+        </div>
+        <div class="file-name" id="file-name"></div>
+        <input type="file" id="file-input" name="gpx_file" accept=".gpx,.igc">
+      </div>
+
+      <!-- Disc Settings -->
+      <div class="section">
+        <div class="section-title">Disc Settings</div>
+        <div class="form-grid">
+          <div class="form-group">
+            <label for="diameter">Diameter</label>
+            <input type="number" id="diameter" name="diameter" value="100" step="1" min="10" max="300">
+            <span class="unit">mm</span>
+          </div>
+          <div class="form-group">
+            <label for="padding">Padding</label>
+            <input type="number" id="padding" name="padding" value="0.20" step="0.05" min="0" max="1">
+            <span class="unit">ratio (0.20 = 20%)</span>
+          </div>
+          <div class="form-group">
+            <label for="exaggeration">Vertical Exaggeration</label>
+            <input type="number" id="exaggeration" name="exaggeration" value="1.0" step="0.1" min="0.1" max="10">
+            <span class="unit">multiplier</span>
+          </div>
+          <div class="form-group">
+            <label for="resolution">Resolution</label>
+            <input type="number" id="resolution" name="resolution" value="512" step="64" min="64" max="2000">
+            <span class="unit">pixels per side</span>
+          </div>
+          <div class="form-group">
+            <label for="base_height">Base Height</label>
+            <input type="number" id="base_height" name="base_height" value="3.0" step="0.5" min="0.5" max="20">
+            <span class="unit">mm</span>
+          </div>
+        </div>
+      </div>
+
+      <!-- Track Settings -->
+      <div class="section">
+        <div class="section-title">Track Settings</div>
+        <div class="form-grid">
+          <div class="form-group">
+            <label for="track_width">Track Width</label>
+            <input type="number" id="track_width" name="track_width" value="0.6" step="0.1" min="0.1" max="5">
+            <span class="unit">mm</span>
+          </div>
+          <div class="form-group">
+            <label for="track_raise">Track Raise</label>
+            <input type="number" id="track_raise" name="track_raise" value="0.6" step="0.1" min="0" max="5">
+            <span class="unit">mm above terrain</span>
+          </div>
+          <div class="form-group">
+            <label for="track_intrude">Track Intrude</label>
+            <input type="number" id="track_intrude" name="track_intrude" value="2.0" step="0.1" min="0" max="10">
+            <span class="unit">mm into terrain</span>
+          </div>
+          <div class="form-group">
+            <label for="track_tolerance">Track Tolerance</label>
+            <input type="number" id="track_tolerance" name="track_tolerance" value="0.2" step="0.05" min="0" max="2">
+            <span class="unit">mm clearance gap</span>
+          </div>
+        </div>
+      </div>
+
+      <!-- Water Settings -->
+      <div class="section">
+        <div class="section-title">Water Settings</div>
+        <div class="form-grid">
+          <div class="form-group">
+            <label for="min_water_area">Min Water Area</label>
+            <input type="number" id="min_water_area" name="min_water_area" value="500000" step="10000" min="0">
+            <span class="unit">m&sup2;</span>
+          </div>
+        </div>
+        <div class="checkbox-row" style="margin-top: 14px;">
+          <div class="checkbox-group">
+            <input type="checkbox" id="rivers" name="rivers">
+            <label for="rivers">Include rivers</label>
+          </div>
+          <div class="checkbox-group">
+            <input type="checkbox" id="no_water" name="no_water">
+            <label for="no_water">Skip water detection</label>
+          </div>
+        </div>
+      </div>
+
+      <button type="submit" class="generate-btn" id="generate-btn" disabled>
+        Generate STL
+      </button>
+    </form>
+
+    <div class="status" id="status"></div>
+  </div>
+
+  <script>
+    const uploadArea = document.getElementById('upload-area');
+    const fileInput = document.getElementById('file-input');
+    const fileNameEl = document.getElementById('file-name');
+    const form = document.getElementById('gen-form');
+    const btn = document.getElementById('generate-btn');
+    const statusEl = document.getElementById('status');
+
+    // Click to browse
+    uploadArea.addEventListener('click', () => fileInput.click());
+
+    // Drag & drop
+    uploadArea.addEventListener('dragover', e => {
+      e.preventDefault();
+      uploadArea.classList.add('drag-over');
+    });
+    uploadArea.addEventListener('dragleave', () => {
+      uploadArea.classList.remove('drag-over');
+    });
+    uploadArea.addEventListener('drop', e => {
+      e.preventDefault();
+      uploadArea.classList.remove('drag-over');
+      if (e.dataTransfer.files.length) {
+        fileInput.files = e.dataTransfer.files;
+        onFileSelected();
+      }
+    });
+
+    fileInput.addEventListener('change', onFileSelected);
+
+    function onFileSelected() {
+      const file = fileInput.files[0];
+      if (file) {
+        fileNameEl.textContent = file.name;
+        uploadArea.classList.add('has-file');
+        btn.disabled = false;
+      }
+    }
+
+    // Submit
+    form.addEventListener('submit', async e => {
+      e.preventDefault();
+      btn.disabled = true;
+      statusEl.className = 'status';
+      statusEl.innerHTML = '<span class="spinner"></span><span class="message">Generating terrain model... This may take a minute.</span>';
+
+      const formData = new FormData(form);
+
+      try {
+        const resp = await fetch('/generate', { method: 'POST', body: formData });
+
+        if (!resp.ok) {
+          const data = await resp.json();
+          throw new Error(data.error || 'Generation failed');
+        }
+
+        // Download the file
+        const blob = await resp.blob();
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        const disposition = resp.headers.get('Content-Disposition') || '';
+        const match = disposition.match(/filename="?(.+?)"?$/);
+        a.download = match ? match[1] : 'terrain.stl';
+        a.href = url;
+        a.click();
+        URL.revokeObjectURL(url);
+
+        statusEl.className = 'status success';
+        statusEl.innerHTML = '<span class="message">STL generated and downloaded successfully!</span>';
+      } catch (err) {
+        statusEl.className = 'status error';
+        statusEl.innerHTML = `<span class="message">Error: ${err.message}</span>`;
+      } finally {
+        btn.disabled = false;
+      }
+    });
+  </script>
+</body>
+</html>

@@ -240,6 +240,13 @@ def build_and_export(
                 disc_shape = disc_shape.buffer(0)
             plate_thickness = 1.0
 
+            # Shrink disc by 1 mm for water clipping so water polygons leave a
+            # clean terrain border at the disc edge instead of running right
+            # to the boundary (required for 3D printing).
+            water_disc_shape = disc_shape.buffer(-1.0)
+            if water_disc_shape.is_empty or not water_disc_shape.is_valid:
+                water_disc_shape = disc_shape
+
             # Build track buffer in model space for subtracting from water plates.
             # Uses the same half-width as the terrain groove so the cutout matches.
             track_buf_ms = None
@@ -278,7 +285,7 @@ def build_and_export(
                 except Exception:
                     continue
 
-                clipped = poly_ms.intersection(disc_shape)
+                clipped = poly_ms.intersection(water_disc_shape)
                 if clipped.is_empty:
                     continue
 
@@ -431,16 +438,16 @@ def build_and_export(
     tri_dt = Delaunay(all_xy)
 
     # Keep only triangles that span the annular gap (have both ring and grid verts)
-    # and lie inside the disc
+    # and lie inside the shape boundary
     for simplex in tri_dt.simplices:
         has_ring = any(is_ring[i] for i in simplex)
         has_grid = any(not is_ring[i] for i in simplex)
         if not (has_ring and has_grid):
             continue
-        # Check centroid is inside disc
+        # Check centroid is inside the shape (with generous margin)
         cx = all_xy[simplex, 0].mean()
         cy = all_xy[simplex, 1].mean()
-        if np.hypot(cx, cy) > radius_mm * 1.01:
+        if not inside_func(np.array([cx]), np.array([cy]), -pixel_size_mm * 2)[0]:
             continue
         i0, i1, i2 = simplex
         v0 = (float(all_xy[i0, 0]), float(all_xy[i0, 1]), float(all_z[i0]))

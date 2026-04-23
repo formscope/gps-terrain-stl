@@ -63,9 +63,15 @@ def main():
         args.output = os.path.splitext(args.input)[0] + ".stl"
 
     # Derive padding from edge margin if not explicitly provided.
+    # Shape-aware: hexagon's inscribed circle is smaller than its circumradius,
+    # so the usable track radius shrinks accordingly.
     if args.padding is None:
         disc_radius_mm = args.diameter / 2.0
-        track_radius_mm = max(disc_radius_mm - args.edge_margin, 1.0)
+        if args.shape == "hexagon":
+            inscribed_radius_mm = disc_radius_mm * (3 ** 0.5) / 2.0
+        else:
+            inscribed_radius_mm = disc_radius_mm
+        track_radius_mm = max(inscribed_radius_mm - args.edge_margin, 1.0)
         args.padding = (disc_radius_mm - track_radius_mm) / track_radius_mm
 
     # --- Load track ---

@@ -37,11 +37,20 @@ def generate():
 
     # Read parameters from form
     diameter = float(request.form.get("diameter", 100.0))
+    shape = request.form.get("shape", "circle")
+    if shape not in ("circle", "square", "hexagon"):
+        shape = "circle"
     # Edge margin in mm: minimum distance between outermost track point and disc edge.
-    # Convert to fractional padding relative to the track radius in model space.
+    # Shape-aware: the inscribed-circle radius is smaller than the half-diameter
+    # for a hexagon, so we reduce the usable radius accordingly.
     edge_margin_mm = float(request.form.get("edge_margin", 10.0))
     disc_radius_mm = diameter / 2.0
-    track_radius_mm = max(disc_radius_mm - edge_margin_mm, 1.0)
+    if shape == "hexagon":
+        inscribed_radius_mm = disc_radius_mm * (3 ** 0.5) / 2.0
+    else:
+        inscribed_radius_mm = disc_radius_mm
+    track_radius_mm = max(inscribed_radius_mm - edge_margin_mm, 1.0)
+    # padding is defined relative to the circumscribed disc radius (same as before)
     padding = (disc_radius_mm - track_radius_mm) / track_radius_mm
     exaggeration = float(request.form.get("exaggeration", 1.0))
     resolution = int(request.form.get("resolution", 512))
@@ -53,9 +62,6 @@ def generate():
     min_water_area = float(request.form.get("min_water_area", 500000))
     rivers = request.form.get("rivers") == "on"
     no_water = request.form.get("no_water") == "on"
-    shape = request.form.get("shape", "circle")
-    if shape not in ("circle", "square", "hexagon"):
-        shape = "circle"
 
     # Save uploaded file to temp dir
     tmp_dir = tempfile.mkdtemp()

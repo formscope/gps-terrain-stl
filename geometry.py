@@ -1,6 +1,8 @@
 """Coordinate transforms and track geometry calculations."""
 
 import numpy as np
+import shapely
+from shapely.geometry import MultiPoint
 from pyproj import Transformer
 
 _to_lv95 = Transformer.from_crs("EPSG:4326", "EPSG:2056", always_xy=True)
@@ -31,8 +33,21 @@ def compute_geometry(
 
     east, north = wgs84_to_lv95(lats, lons)
 
-    ce, cn = east.mean(), north.mean()
-    max_dist = np.hypot(east - ce, north - cn).max()
+    # Minimum bounding circle of the track: smallest circle enclosing all
+    # points.  Using this instead of the centroid + max-distance gives an
+    # optimal center for asymmetric tracks and maximises the usable area
+    # inside the disc.
+    mp = MultiPoint(list(zip(east.tolist(), north.tolist())))
+    try:
+        circ = shapely.minimum_bounding_circle(mp)
+        ce = float(circ.centroid.x)
+        cn = float(circ.centroid.y)
+        max_dist = float(shapely.minimum_bounding_radius(mp))
+    except Exception:
+        # Fallback: centroid + max distance (older shapely)
+        ce, cn = float(east.mean()), float(north.mean())
+        max_dist = float(np.hypot(east - ce, north - cn).max())
+
     radius_m = max_dist * (1.0 + padding)
 
     return (float(ce), float(cn)), float(radius_m)

@@ -37,7 +37,12 @@ def generate():
 
     # Read parameters from form
     diameter = float(request.form.get("diameter", 100.0))
-    padding = float(request.form.get("padding", 0.20))
+    # Edge margin in mm: minimum distance between outermost track point and disc edge.
+    # Convert to fractional padding relative to the track radius in model space.
+    edge_margin_mm = float(request.form.get("edge_margin", 10.0))
+    disc_radius_mm = diameter / 2.0
+    track_radius_mm = max(disc_radius_mm - edge_margin_mm, 1.0)
+    padding = (disc_radius_mm - track_radius_mm) / track_radius_mm
     exaggeration = float(request.form.get("exaggeration", 1.0))
     resolution = int(request.form.get("resolution", 512))
     base_height = float(request.form.get("base_height", 3.0))

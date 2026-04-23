@@ -28,8 +28,12 @@ def main():
     parser.add_argument("-o", "--output", default=None, help="Output STL file (default: input filename with .stl extension)")
     parser.add_argument("--diameter", type=float, default=100.0,
                         help="Output disc diameter in mm")
-    parser.add_argument("--padding", type=float, default=0.20,
-                        help="Radial padding around outermost track point (0.20 = 20%%)")
+    parser.add_argument("--padding", type=float, default=None,
+                        help="Radial padding around outermost track point (0.20 = 20%%). "
+                             "If omitted, computed from --edge-margin.")
+    parser.add_argument("--edge-margin", type=float, default=10.0,
+                        help="Minimum distance in mm between track and disc edge "
+                             "(used when --padding is not given)")
     parser.add_argument("--exaggeration", type=float, default=1.0,
                         help="Vertical exaggeration factor")
     parser.add_argument("--resolution", type=int, default=512,
@@ -57,6 +61,12 @@ def main():
 
     if args.output is None:
         args.output = os.path.splitext(args.input)[0] + ".stl"
+
+    # Derive padding from edge margin if not explicitly provided.
+    if args.padding is None:
+        disc_radius_mm = args.diameter / 2.0
+        track_radius_mm = max(disc_radius_mm - args.edge_margin, 1.0)
+        args.padding = (disc_radius_mm - track_radius_mm) / track_radius_mm
 
     # --- Load track ---
     print(f"Loading track: {args.input}")

@@ -14,10 +14,18 @@ except ImportError:
 
 OVERPASS_MIRRORS = [
     "https://overpass-api.de/api/interpreter",
+    "https://overpass.kumi.systems/api/interpreter",
+    "https://overpass.private.coffee/api/interpreter",
+    "https://overpass.osm.ch/api/interpreter",
     "https://overpass.openstreetmap.fr/api/interpreter",
-    "https://maps.mail.ru/osm/tools/overpass/api/interpreter",
-    "https://overpass.openstreetmap.ru/api/interpreter",
 ]
+
+# Overpass enforces a usage policy that requires a descriptive User-Agent
+# and an Accept header; without these, some mirrors return 406/403.
+REQUEST_HEADERS = {
+    "User-Agent": "gps-terrain-stl/1.0 (https://github.com/ChristophSiegenthaler/gps-terrain-stl)",
+    "Accept": "application/json",
+}
 
 CACHE_DIR = os.path.expanduser("~/.cache/gps-terrain-stl/water")
 
@@ -176,7 +184,8 @@ def _fetch_with_cache(query: str) -> list | None:
             try:
                 print(f"  Trying {mirror} ({method}) …")
                 resp = requests.request(
-                    method, mirror, timeout=(10, 60), **kwargs
+                    method, mirror, timeout=(10, 60),
+                    headers=REQUEST_HEADERS, **kwargs
                 )
                 resp.raise_for_status()
                 elements = resp.json().get("elements", [])

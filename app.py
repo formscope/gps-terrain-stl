@@ -1,17 +1,11 @@
 """Flask web interface for gps-terrain-stl."""
 
-import gc
 import glob
 import io
 import os
-import shutil
 import sys
 import tempfile
 import zipfile
-
-# Cap raster resolution server-side to avoid blowing the 512 MB free-tier
-# memory budget on Render. Override with MAX_RESOLUTION env var if needed.
-MAX_RESOLUTION = int(os.environ.get("MAX_RESOLUTION", "384"))
 
 from flask import Flask, render_template, request, send_file, jsonify
 
@@ -59,7 +53,7 @@ def generate():
     # padding is defined relative to the circumscribed disc radius (same as before)
     padding = (disc_radius_mm - track_radius_mm) / track_radius_mm
     exaggeration = float(request.form.get("exaggeration", 1.0))
-    resolution = min(int(request.form.get("resolution", 384)), MAX_RESOLUTION)
+    resolution = int(request.form.get("resolution", 512))
     base_height = float(request.form.get("base_height", 3.0))
     track_width = float(request.form.get("track_width", 0.6))
     track_raise = float(request.form.get("track_raise", 0.6))
@@ -137,27 +131,16 @@ def generate():
                 zf.write(stl_path, arcname)
         buf.seek(0)
 
-        response = send_file(
+        return send_file(
             buf,
             as_attachment=True,
             download_name=f"{base_name}.zip",
             mimetype="application/zip",
         )
-        # Release intermediate STL files and run garbage collection so the
-        # next request starts from a clean memory baseline (free tier = 512 MB).
-        shutil.rmtree(tmp_dir, ignore_errors=True)
-        gc.collect()
-        return response
 
     except Exception as e:
-        shutil.rmtree(tmp_dir, ignore_errors=True)
-        gc.collect()
         return jsonify({"error": str(e)}), 500
 
 
 if __name__ == "__main__":
-    # Local dev: bind on all interfaces so Cloudflare/LAN can reach it.
-    # Render and other PaaS providers honour the PORT env var.
-    port = int(os.environ.get("PORT", 5000))
-    debug = os.environ.get("FLASK_DEBUG", "1") == "1"
-    app.run(host="0.0.0.0", port=port, debug=debug)
+    app.run(debug=True, port=5000)

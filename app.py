@@ -143,4 +143,8 @@ def generate():
 
 
 if __name__ == "__main__":
-    app.run(debug=True, port=5000)
+    # Local dev: bind on all interfaces so Cloudflare/LAN can reach it.
+    # Render and other PaaS providers honour the PORT env var.
+    port = int(os.environ.get("PORT", 5000))
+    debug = os.environ.get("FLASK_DEBUG", "1") == "1"
+    app.run(host="0.0.0.0", port=port, debug=debug)

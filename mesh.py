@@ -489,10 +489,10 @@ def build_and_export(
     # ------------------------------------------------------------------
     track_tris = []
     if track_lv95 and tx is not None:
-        track_tris = _build_track_tube(
+        track_tris = _build_track_solid(
             tx, ty, track_zm, track_width_mm, tube_raise, basis_level,
         )
-        print(f"  Track tube: {len(track_tris)} triangles")
+        print(f"  Track solid: {len(track_tris)} triangles")
 
     # ------------------------------------------------------------------
     # 9. Water plates
@@ -715,6 +715,86 @@ def _densify_track(tx, ty, max_step_mm):
 # ------------------------------------------------------------------
 # Track tube builder
 # ------------------------------------------------------------------
+
+def _build_track_solid(tx, ty, track_zm, width_mm, raise_mm, basis_level):
+    """
+    Build a single watertight track solid using a 2-D Shapely buffer of the
+    polyline.  Self-intersections (loops, lap repeats, out-and-back sections)
+    merge into one polygon, so the resulting STL is always a single body.
+
+    Top z is constant at  max(track_zm) + raise_mm   (small flat ribbon).
+    Bottom z is  basis_level  — same plane as the carved groove floor.
+    """
+    n = len(tx)
+    if n < 2:
+        return []
+
+    try:
+        from shapely.geometry import LineString, MultiPolygon, Polygon
+        from shapely.ops import unary_union
+        from shapely.geometry.polygon import orient
+    except ImportError:
+        # Shapely missing — fall back to the swept-tube version.
+        return _build_track_tube(tx, ty, track_zm, width_mm, raise_mm, basis_level)
+
+    coords = list(zip(tx.tolist(), ty.tolist())) if hasattr(tx, "tolist") else list(zip(tx, ty))
+    line = LineString(coords)
+    # round/round caps so two passes meeting at any angle merge cleanly
+    footprint = line.buffer(width_mm / 2.0, cap_style=1, join_style=1, resolution=8)
+
+    # Treat MultiPolygon by unioning (any disconnected fragments stay separate
+    # mesh bodies — this only happens if the track has truly disjoint segments).
+    if footprint.is_empty:
+        return []
+    if isinstance(footprint, MultiPolygon):
+        polys = list(footprint.geoms)
+    elif isinstance(footprint, Polygon):
+        polys = [footprint]
+    else:
+        polys = []
+
+    z_top = float(np.nanmax(track_zm)) + raise_mm
+    z_bot = float(basis_level)
+
+    tris = []
+    for poly in polys:
+        poly = orient(poly, sign=1.0)   # exterior CCW, holes CW
+
+        # ---- top face (z=z_top) and bottom face (z=z_bot) via earcut ---
+        try:
+            import shapely as shp
+            top_tris = shp.delaunay_triangles(poly, only_edges=False)
+            top_polys = [g for g in top_tris.geoms if poly.contains(g.representative_point())]
+        except Exception:
+            top_polys = []
+
+        for tri in top_polys:
+            (x0, y0), (x1, y1), (x2, y2), _ = list(tri.exterior.coords)
+            tris.append(((x0, y0, z_top), (x1, y1, z_top), (x2, y2, z_top)))
+            # bottom face: flip winding so normal points down
+            tris.append(((x0, y0, z_bot), (x2, y2, z_bot), (x1, y1, z_bot)))
+
+        # ---- side walls along exterior + interiors ----
+        rings = [list(poly.exterior.coords)] + [list(r.coords) for r in poly.interiors]
+        # For a CCW exterior, walls should face outward; CW interiors → inward.
+        for r_idx, ring in enumerate(rings):
+            ccw = (r_idx == 0)
+            for i in range(len(ring) - 1):
+                ax, ay = ring[i]
+                bx, by = ring[i + 1]
+                a_top = (ax, ay, z_top)
+                b_top = (bx, by, z_top)
+                a_bot = (ax, ay, z_bot)
+                b_bot = (bx, by, z_bot)
+                if ccw:
+                    tris.append((a_bot, b_bot, b_top))
+                    tris.append((a_bot, b_top, a_top))
+                else:
+                    tris.append((a_bot, b_top, b_bot))
+                    tris.append((a_bot, a_top, b_top))
+
+    return tris
+
 
 def _build_track_tube(tx, ty, track_zm, width_mm, raise_mm, basis_level):
     """

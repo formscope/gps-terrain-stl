@@ -489,8 +489,18 @@ def build_and_export(
     # ------------------------------------------------------------------
     track_tris = []
     if track_lv95 and tx is not None:
+        # Top of the track follows terrain at every (x,y) → +raise overhang.
+        # Bottom is the constant basis_level plane (flat underside).
+        def _terrain_top_z(xs_mm, ys_mm):
+            """Vectorised terrain z (model space) for an array of (x,y) in mm."""
+            E = ce + np.asarray(xs_mm) / scale_xy
+            N = cn + np.asarray(ys_mm) / scale_xy
+            elev = interp(np.stack([N, E], axis=-1))
+            elev = np.where(np.isnan(elev), elev_min, elev)
+            return (elev - elev_min) * scale_z + base_height_mm
+
         track_tris = _build_track_solid(
-            tx, ty, track_zm, track_width_mm, tube_raise, basis_level,
+            tx, ty, track_width_mm, tube_raise, basis_level, _terrain_top_z,
         )
         print(f"  Track solid: {len(track_tris)} triangles")
 
@@ -716,14 +726,15 @@ def _densify_track(tx, ty, max_step_mm):
 # Track tube builder
 # ------------------------------------------------------------------
 
-def _build_track_solid(tx, ty, track_zm, width_mm, raise_mm, basis_level):
+def _build_track_solid(tx, ty, width_mm, raise_mm, basis_level, terrain_top_z):
     """
     Build a single watertight track solid using a 2-D Shapely buffer of the
     polyline.  Self-intersections (loops, lap repeats, out-and-back sections)
     merge into one polygon, so the resulting STL is always a single body.
 
-    Top z is constant at  max(track_zm) + raise_mm   (small flat ribbon).
-    Bottom z is  basis_level  — same plane as the carved groove floor.
+    Underside  : constant z = basis_level  (flat plane shared with the groove).
+    Top surface: follows the terrain elevation + raise_mm at every (x, y),
+                 sampled via the supplied terrain_top_z(xs, ys) callable.
     """
     n = len(tx)
     if n < 2:
@@ -731,19 +742,17 @@ def _build_track_solid(tx, ty, track_zm, width_mm, raise_mm, basis_level):
 
     try:
         from shapely.geometry import LineString, MultiPolygon, Polygon
-        from shapely.ops import unary_union
         from shapely.geometry.polygon import orient
     except ImportError:
-        # Shapely missing — fall back to the swept-tube version.
-        return _build_track_tube(tx, ty, track_zm, width_mm, raise_mm, basis_level)
+        # Shapely missing — fall back to a constant-height swept tube.
+        return _build_track_tube(tx, ty, np.full(n, basis_level + raise_mm),
+                                 width_mm, raise_mm, basis_level)
 
     coords = list(zip(tx.tolist(), ty.tolist())) if hasattr(tx, "tolist") else list(zip(tx, ty))
     line = LineString(coords)
     # round/round caps so two passes meeting at any angle merge cleanly
     footprint = line.buffer(width_mm / 2.0, cap_style=1, join_style=1, resolution=8)
 
-    # Treat MultiPolygon by unioning (any disconnected fragments stay separate
-    # mesh bodies — this only happens if the track has truly disjoint segments).
     if footprint.is_empty:
         return []
     if isinstance(footprint, MultiPolygon):
@@ -753,37 +762,51 @@ def _build_track_solid(tx, ty, track_zm, width_mm, raise_mm, basis_level):
     else:
         polys = []
 
-    z_top = float(np.nanmax(track_zm)) + raise_mm
     z_bot = float(basis_level)
+
+    # Cache top z for any (x,y) we encounter so duplicate vertices share the
+    # same height (avoids tiny seams between top triangles and side walls).
+    z_top_cache = {}
+
+    def top_z(x, y):
+        key = (round(x, 6), round(y, 6))
+        z = z_top_cache.get(key)
+        if z is None:
+            z = float(terrain_top_z(np.array([x]), np.array([y]))[0]) + raise_mm
+            z_top_cache[key] = z
+        return z
 
     tris = []
     for poly in polys:
         poly = orient(poly, sign=1.0)   # exterior CCW, holes CW
 
-        # ---- top face (z=z_top) and bottom face (z=z_bot) via earcut ---
+        # ---- top + bottom faces via Delaunay triangulation -----------
         try:
             import shapely as shp
-            top_tris = shp.delaunay_triangles(poly, only_edges=False)
-            top_polys = [g for g in top_tris.geoms if poly.contains(g.representative_point())]
+            tri_collection = shp.delaunay_triangles(poly, only_edges=False)
+            inside_tris = [g for g in tri_collection.geoms
+                           if poly.contains(g.representative_point())]
         except Exception:
-            top_polys = []
+            inside_tris = []
 
-        for tri in top_polys:
+        for tri in inside_tris:
             (x0, y0), (x1, y1), (x2, y2), _ = list(tri.exterior.coords)
-            tris.append(((x0, y0, z_top), (x1, y1, z_top), (x2, y2, z_top)))
-            # bottom face: flip winding so normal points down
+            zt0, zt1, zt2 = top_z(x0, y0), top_z(x1, y1), top_z(x2, y2)
+            tris.append(((x0, y0, zt0), (x1, y1, zt1), (x2, y2, zt2)))
+            # bottom: flat at z_bot, flip winding so normal points down
             tris.append(((x0, y0, z_bot), (x2, y2, z_bot), (x1, y1, z_bot)))
 
-        # ---- side walls along exterior + interiors ----
+        # ---- side walls (CCW exterior → outward, CW holes → inward) --
         rings = [list(poly.exterior.coords)] + [list(r.coords) for r in poly.interiors]
-        # For a CCW exterior, walls should face outward; CW interiors → inward.
         for r_idx, ring in enumerate(rings):
             ccw = (r_idx == 0)
             for i in range(len(ring) - 1):
                 ax, ay = ring[i]
                 bx, by = ring[i + 1]
-                a_top = (ax, ay, z_top)
-                b_top = (bx, by, z_top)
+                za = top_z(ax, ay)
+                zb = top_z(bx, by)
+                a_top = (ax, ay, za)
+                b_top = (bx, by, zb)
                 a_bot = (ax, ay, z_bot)
                 b_bot = (bx, by, z_bot)
                 if ccw:

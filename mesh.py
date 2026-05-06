@@ -193,31 +193,43 @@ def build_and_export(
 
         basis_level = float(np.min(track_zm) - tube_intrude)
 
-        # Carve groove: lower terrain to basis_level within (width/2 + tolerance)
-        # of the track path. Densify the track to sub-pixel spacing first so the
-        # groove boundary follows curves faithfully at the grid resolution.
+        # Build a smooth groove polygon (LineString.buffer) instead of
+        # rasterizing into the grid.  Section 4 uses this polygon to clip
+        # terrain triangles, so the groove edge follows the polygon exactly
+        # — no pixel stairsteps — preserving fit precision with the track
+        # solid (which uses the same buffer recipe minus track_tolerance_mm).
         pixel_size_mm = 2.0 * radius_mm / N
         tx_dense, ty_dense = _densify_track(tx, ty, pixel_size_mm * 0.5)
-
         groove_half_width = track_width_mm / 2.0 + track_tolerance_mm
-        min_dist_sq = np.full((N, N), np.inf)
-
-        for k in range(len(tx_dense) - 1):
-            ax, ay = float(tx_dense[k]), float(ty_dense[k])
-            bx, by = float(tx_dense[k + 1]), float(ty_dense[k + 1])
-            dx, dy = bx - ax, by - ay
-            seg_len2 = dx * dx + dy * dy
-            if seg_len2 < 1e-12:
-                d2 = (Xm - ax) ** 2 + (Ym - ay) ** 2
-            else:
-                t = np.clip(((Xm - ax) * dx + (Ym - ay) * dy) / seg_len2, 0.0, 1.0)
-                cx = ax + t * dx
-                cy = ay + t * dy
-                d2 = (Xm - cx) ** 2 + (Ym - cy) ** 2
-            np.minimum(min_dist_sq, d2, out=min_dist_sq)
-
-        groove_mask = (~np.isnan(Zm)) & (min_dist_sq < groove_half_width ** 2)
-        Zm = np.where(groove_mask & (Zm > basis_level), basis_level, Zm)
+        try:
+            from shapely.geometry import LineString as _SLS
+            line_ms = _SLS(list(zip(tx_dense.tolist(), ty_dense.tolist())))
+            groove_poly_ms = line_ms.buffer(
+                groove_half_width, cap_style=1, join_style=1, resolution=16
+            )
+            if not groove_poly_ms.is_valid:
+                groove_poly_ms = groove_poly_ms.buffer(0)
+        except ImportError:
+            # Shapely missing → fall back to per-pixel carving.
+            groove_poly_ms = None
+            min_dist_sq = np.full((N, N), np.inf)
+            for k in range(len(tx_dense) - 1):
+                ax, ay = float(tx_dense[k]), float(ty_dense[k])
+                bx, by = float(tx_dense[k + 1]), float(ty_dense[k + 1])
+                dx, dy = bx - ax, by - ay
+                seg_len2 = dx * dx + dy * dy
+                if seg_len2 < 1e-12:
+                    d2 = (Xm - ax) ** 2 + (Ym - ay) ** 2
+                else:
+                    t = np.clip(((Xm - ax) * dx + (Ym - ay) * dy) / seg_len2, 0.0, 1.0)
+                    cx = ax + t * dx
+                    cy = ay + t * dy
+                    d2 = (Xm - cx) ** 2 + (Ym - cy) ** 2
+                np.minimum(min_dist_sq, d2, out=min_dist_sq)
+            groove_mask = (~np.isnan(Zm)) & (min_dist_sq < groove_half_width ** 2)
+            Zm = np.where(groove_mask & (Zm > basis_level), basis_level, Zm)
+    else:
+        groove_poly_ms = None
 
     # ------------------------------------------------------------------
     # 2c. Water polygon conversion + terrain carving
@@ -373,12 +385,37 @@ def build_and_export(
     ring_verts_top = list(zip(ring_x.tolist(), ring_y.tolist(), ring_z.tolist()))
 
     # ------------------------------------------------------------------
-    # 4. Terrain top-surface triangles (interior grid)
+    # 4. Terrain top-surface triangles (interior grid + groove clipping)
     # ------------------------------------------------------------------
     triangles = []
 
     def v(r, c):
         return (float(Xm[r, c]), float(Ym[r, c]), float(Zm[r, c]))
+
+    # Helper: terrain z (model space) at any (x_mm, y_mm) via the LV95 interp.
+    def _terrain_z(x_mm, y_mm):
+        E = ce + x_mm / scale_xy
+        Nn = cn + y_mm / scale_xy
+        elev = float(interp(np.array([[Nn, E]]))[0])
+        if np.isnan(elev):
+            elev = elev_min
+        return (elev - elev_min) * scale_z + base_height_mm
+
+    # Per-grid-corner groove mask (True = corner inside groove polygon).
+    # Used to short-circuit pixels that sit fully inside or fully outside.
+    if groove_poly_ms is not None:
+        try:
+            import shapely as shp
+            from shapely.geometry import Polygon as _SPoly
+            from shapely.geometry.polygon import orient as _orient
+            corner_in_groove = shp.contains_xy(
+                groove_poly_ms, Xm.ravel(), Ym.ravel()
+            ).reshape(N, N)
+        except Exception:
+            corner_in_groove = None
+            groove_poly_ms = None
+    else:
+        corner_in_groove = None
 
     for row in range(N - 1):
         for col in range(N - 1):
@@ -386,8 +423,114 @@ def build_and_export(
             bl, br = v(row + 1, col), v(row + 1, col + 1)
             if any(np.isnan(vert[2]) for vert in (tl, tr, bl, br)):
                 continue
-            triangles.append((tl, bl, br))
-            triangles.append((tl, br, tr))
+
+            if corner_in_groove is None:
+                triangles.append((tl, bl, br))
+                triangles.append((tl, br, tr))
+                continue
+
+            n_in = (int(corner_in_groove[row, col])
+                    + int(corner_in_groove[row, col + 1])
+                    + int(corner_in_groove[row + 1, col])
+                    + int(corner_in_groove[row + 1, col + 1]))
+
+            if n_in == 0:
+                # Fully outside groove → standard terrain triangulation.
+                triangles.append((tl, bl, br))
+                triangles.append((tl, br, tr))
+            elif n_in == 4:
+                # Fully inside groove → groove floor triangulation handles
+                # this area smoothly (skip here to avoid double-coverage).
+                continue
+            else:
+                # Quad straddles groove boundary → clip the OUTSIDE part
+                # against the groove polygon and triangulate that.
+                # Quad as CCW polygon: tl → bl → br → tr.
+                quad_poly = _SPoly([
+                    (tl[0], tl[1]),
+                    (bl[0], bl[1]),
+                    (br[0], br[1]),
+                    (tr[0], tr[1]),
+                ])
+                outside = quad_poly.difference(groove_poly_ms)
+                if outside.is_empty:
+                    continue
+                geoms = (list(outside.geoms) if hasattr(outside, "geoms")
+                         else [outside])
+                for geom in geoms:
+                    if not isinstance(geom, _SPoly) or geom.is_empty:
+                        continue
+                    try:
+                        tri_coll = shp.delaunay_triangles(geom, only_edges=False)
+                        sub_tris = [g for g in tri_coll.geoms
+                                    if geom.contains(g.representative_point())]
+                    except Exception:
+                        sub_tris = []
+                    for tri in sub_tris:
+                        coords = list(tri.exterior.coords)[:3]
+                        verts = [(x, y, _terrain_z(x, y)) for (x, y) in coords]
+                        a, b, c = verts
+                        # CCW winding so the normal points up.
+                        if (b[0] - a[0]) * (c[1] - a[1]) - (b[1] - a[1]) * (c[0] - a[0]) < 0:
+                            b, c = c, b
+                        triangles.append((a, b, c))
+
+    # ------------------------------------------------------------------
+    # 4b. Groove floor + walls (smooth, polygon-based)
+    # ------------------------------------------------------------------
+    if groove_poly_ms is not None and corner_in_groove is not None:
+        try:
+            disc_ring_coords = list(zip(ring_x.tolist(), ring_y.tolist()))
+            disc_ring_coords.append(disc_ring_coords[0])
+            disc_shape_groove = _SPoly(disc_ring_coords)
+            if not disc_shape_groove.is_valid:
+                disc_shape_groove = disc_shape_groove.buffer(0)
+            groove_in_disc = groove_poly_ms.intersection(disc_shape_groove)
+        except Exception:
+            groove_in_disc = groove_poly_ms
+
+        groove_geoms = (list(groove_in_disc.geoms)
+                        if hasattr(groove_in_disc, "geoms")
+                        else [groove_in_disc])
+
+        for poly in groove_geoms:
+            if not isinstance(poly, _SPoly) or poly.is_empty:
+                continue
+            poly = _orient(poly, sign=1.0)
+
+            # --- Floor: flat plate at basis_level (normal up, into cavity) ---
+            try:
+                tri_coll = shp.delaunay_triangles(poly, only_edges=False)
+                floor_tris = [g for g in tri_coll.geoms
+                              if poly.contains(g.representative_point())]
+            except Exception:
+                floor_tris = []
+            for tri in floor_tris:
+                coords = list(tri.exterior.coords)[:3]
+                a = (coords[0][0], coords[0][1], basis_level)
+                b = (coords[1][0], coords[1][1], basis_level)
+                c = (coords[2][0], coords[2][1], basis_level)
+                # CCW in plan → normal points up (into the empty cavity above).
+                if (b[0] - a[0]) * (c[1] - a[1]) - (b[1] - a[1]) * (c[0] - a[0]) < 0:
+                    b, c = c, b
+                triangles.append((a, b, c))
+
+            # --- Walls: cavity is on the LEFT for both exterior (CCW) and
+            #     hole (CW) rings after orient(poly, 1.0).  A single winding
+            #     puts the wall normal into the cavity for all rings. ---
+            for ring in [poly.exterior] + list(poly.interiors):
+                coords = list(ring.coords)
+                for i in range(len(coords) - 1):
+                    x0, y0 = coords[i]
+                    x1, y1 = coords[i + 1]
+                    zt0 = _terrain_z(x0, y0)
+                    zt1 = _terrain_z(x1, y1)
+                    a_bot = (x0, y0, basis_level)
+                    b_bot = (x1, y1, basis_level)
+                    a_top = (x0, y0, zt0)
+                    b_top = (x1, y1, zt1)
+                    triangles.append((a_bot, b_top, b_bot))
+                    triangles.append((a_bot, a_top, b_top))
 
     # ------------------------------------------------------------------
     # 5. Stitch smooth ring to inner grid boundary

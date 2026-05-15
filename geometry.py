@@ -112,14 +112,32 @@ def compute_rect_geometry(
 
     # Scale (mm per metre) chosen so the track fits with margin on the
     # binding side. Both sides have at least `edge_margin_mm` of clearance.
-    scale_long = (long_side - 2 * edge_margin_mm) / max(u_range, 1e-6)
-    scale_short = (short_side - 2 * edge_margin_mm) / max(v_range, 1e-6)
+    # Robustness: a degenerate track (one point, or all points colinear)
+    # makes u_range or v_range zero, which would blow up the scale.  Floor
+    # both ranges at 1 m so we still produce a sensible plate.
+    u_range_safe = max(u_range, 1.0)
+    v_range_safe = max(v_range, 1.0)
+    scale_long = (long_side - 2 * edge_margin_mm) / u_range_safe
+    scale_short = (short_side - 2 * edge_margin_mm) / v_range_safe
     scale = float(min(scale_long, scale_short))
     if scale <= 0:
-        scale = 1e-6
+        # Margin was larger than the rectangle → fall back to filling the
+        # whole plate.  No physical track will produce this on purpose.
+        scale = float(max(long_side, short_side) / 2.0 / max(u_range_safe, v_range_safe))
 
     radius_mm_grid = max(rect_width_mm, rect_height_mm) / 2.0
     radius_m = radius_mm_grid / scale
+
+    # Sanity cap: LV95 is only valid inside Switzerland.  If the plate area
+    # would need elevation data more than ~250 km from the centre, the track
+    # is almost certainly outside the supported region (or pathological) —
+    # raise a clear error rather than asking Amazon for an ocean tile.
+    if radius_m > 250_000:
+        raise ValueError(
+            f"Plate would need elevation data over a {2*radius_m/1000:.0f} km area, "
+            "which is far outside the SwissALTI3D / LV95 coverage. "
+            "Check that the GPX file is in Switzerland and not a single point."
+        )
 
     return (ce, cn), float(radius_m), float(rotation_rad)
 

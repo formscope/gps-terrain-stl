@@ -53,10 +53,12 @@ def main():
                         help="How far the track intrudes into terrain in mm")
     parser.add_argument("--track-tolerance", type=float, default=0.2,
                         help="Clearance gap carved into terrain on each side of track in mm")
-    parser.add_argument("--min-water-area", type=float, default=500_000,
-                        help="Minimum water body area in m² to include (default: 500,000 = 50 ha)")
+    parser.add_argument("--min-water-area", type=float, default=8_000_000,
+                        help="Minimum water body area in m² to include (default: 8,000,000 = 8 km²)")
     parser.add_argument("--rivers", action="store_true",
-                        help="Include rivers and riverbanks as water plates (disabled by default)")
+                        help="Include the main Swiss rivers as 0.9 mm wide ribbons (disabled by default)")
+    parser.add_argument("--river-width", type=float, default=0.9,
+                        help="Render width of main rivers in mm (printable on a 3D printer)")
     parser.add_argument("--no-water", action="store_true",
                         help="Skip water body detection and plates")
     parser.add_argument("--shape", choices=["circle", "square", "hexagon", "rectangle"],
@@ -128,12 +130,16 @@ def main():
 
     # --- Water bodies ---
     if args.no_water:
-        water_polys = []
+        water_polys, river_lines = [], []
     else:
         print("Fetching water bodies from OpenStreetMap…")
-        water_polys = fetch_water_bodies(center_lv95, radius_m, min_area_m2=args.min_water_area,
-                                         include_rivers=args.rivers)
-        print(f"  {len(water_polys)} water polygon(s) found")
+        water_polys, river_lines = fetch_water_bodies(
+            center_lv95, radius_m,
+            min_area_m2=args.min_water_area,
+            include_rivers=args.rivers,
+        )
+        print(f"  {len(water_polys)} water polygon(s), "
+              f"{len(river_lines)} main river segment(s) found")
 
     # --- Build mesh & export (split long rectangles into ≤240 mm tiles) ---
     if args.shape == "rectangle" and max(args.rect_width, args.rect_height) > 240.0:
@@ -174,6 +180,8 @@ def main():
             track_intrude_mm=args.track_intrude,
             track_tolerance_mm=args.track_tolerance,
             water_polys_lv95=water_polys,
+            rivers_lv95=river_lines,
+            river_width_mm=args.river_width,
             shape=args.shape,
             rect_width_mm=tile["rect_width_mm"],
             rect_height_mm=tile["rect_height_mm"],

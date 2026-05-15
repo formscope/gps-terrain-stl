@@ -464,14 +464,19 @@
         <div class="form-grid">
           <div class="form-group">
             <label for="min_water_area">Min Water Area</label>
-            <input type="number" id="min_water_area" name="min_water_area" value="500000" step="10000" min="0">
-            <span class="unit">m&sup2;</span>
+            <input type="number" id="min_water_area" name="min_water_area" value="8000000" step="100000" min="0">
+            <span class="unit">m&sup2; (default 8 km&sup2;)</span>
+          </div>
+          <div class="form-group">
+            <label for="river_width">Flussbreite</label>
+            <input type="number" id="river_width" name="river_width" value="0.9" step="0.1" min="0.2" max="5">
+            <span class="unit">mm (Druck-Breite)</span>
           </div>
         </div>
         <div class="checkbox-row" style="margin-top: 14px;">
           <div class="checkbox-group">
             <input type="checkbox" id="rivers" name="rivers">
-            <label for="rivers">Include rivers</label>
+            <label for="rivers">Hauptflüsse einblenden</label>
           </div>
           <div class="checkbox-group">
             <input type="checkbox" id="no_water" name="no_water">

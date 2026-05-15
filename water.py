@@ -7,10 +7,54 @@ import requests
 from pyproj import Transformer
 
 try:
-    from shapely.geometry import Polygon
+    from shapely.geometry import LineString, Polygon
     SHAPELY_OK = True
 except ImportError:
     SHAPELY_OK = False
+
+# Whitelist of "main rivers" rendered as 0.9 mm wide ribbons on the plate.
+# Names are case-insensitive and matched after stripping whitespace; multilingual
+# variants are listed because OpenStreetMap stores the locally dominant form.
+MAIN_RIVER_NAMES = {
+    # Largest Swiss rivers
+    "rhein", "rhin", "rhine",
+    "aare", "aar",
+    "reuss", "reuß",
+    "rhône", "rhone", "rotten",
+    "ticino", "tessin",
+    "inn", "en",
+    # Major tributaries / well-known rivers
+    "limmat",
+    "sihl",
+    "thur",
+    "linth",
+    "töss", "toess",
+    "birs",
+    "birsig",
+    "saane", "sarine",
+    "doubs",
+    "glatt",
+    "verzasca",
+    "maggia",
+    "emme",
+    "kleine emme",
+    "murg",
+    "necker",
+    "suhre",
+    "wigger",
+    "wiese",
+    "lorze",
+    "engelberger aa",
+    "sarner aa",
+    "muota",
+    "broye",
+    "orbe",
+    "areuse",
+    "versoix",
+    "arve",
+    "venoge",
+    "goldach",
+}
 
 OVERPASS_MIRRORS = [
     "https://overpass-api.de/api/interpreter",
@@ -33,23 +77,24 @@ CACHE_DIR = os.path.expanduser("~/.cache/gps-terrain-stl/water")
 def fetch_water_bodies(
     center_lv95: tuple,
     radius_m: float,
-    min_area_m2: float = 100_000,
+    min_area_m2: float = 8_000_000,
     include_rivers: bool = False,
-) -> list:
+) -> tuple[list, list]:
     """
     Query Overpass for natural=water / landuse=reservoir polygons in the area.
 
-    When include_rivers is True also fetches natural=water + water=river and
-    waterway=riverbank polygons (disabled by default because they produce thin
-    elongated plates that can look odd on small discs).
+    Returns: (polygons, rivers)
+      polygons - list of shapely Polygon (lakes, reservoirs) with area
+                 >= min_area_m2.  Default 8 km².
+      rivers   - list of shapely LineString in LV95.  Only main Swiss rivers
+                 (see MAIN_RIVER_NAMES) are returned, and only when
+                 include_rivers is True.
 
-    Results are cached locally so repeated runs skip the network request.
-    Returns a list of shapely Polygon objects in LV95 coordinates,
-    or an empty list if shapely is unavailable or the request fails.
+    Both lists are empty if shapely is unavailable or the request fails.
     """
     if not SHAPELY_OK:
         print("  shapely not installed — skipping water bodies.")
-        return []
+        return [], []
 
     # LV95 centre + radius → WGS84 bounding box
     to_wgs84 = Transformer.from_crs("EPSG:2056", "EPSG:4326", always_xy=True)
@@ -63,17 +108,15 @@ def fetch_water_bodies(
 
     bb = f"({south},{west},{north},{east})"
 
+    # Lakes & reservoirs only as polygons — rivers are fetched as
+    # waterway=river LineStrings below so we can render them at a printable
+    # constant width regardless of the actual river width.
+    exclude = '["water"!="river"]["water"!="canal"]["water"!="stream"]'
     if include_rivers:
-        # Include rivers; still exclude canals and streams.
-        exclude = '["water"!="canal"]["water"!="stream"]'
         river_lines = (
-            f'  way["waterway"="riverbank"]{bb};\n'
-            f'  relation["waterway"="riverbank"]["type"="multipolygon"]{bb};\n'
+            f'  way["waterway"="river"]["name"]{bb};\n'
         )
     else:
-        # Exclude rivers, canals and streams — they appear as thin elongated
-        # polygons that look wrong on a terrain disc.
-        exclude = '["water"!="river"]["water"!="canal"]["water"!="stream"]'
         river_lines = ""
 
     query = (
@@ -91,7 +134,7 @@ def fetch_water_bodies(
     elements = _fetch_with_cache(query)
     if elements is None:
         print("  Warning: all Overpass mirrors failed — skipping water bodies.")
-        return []
+        return [], []
 
     to_lv95 = Transformer.from_crs("EPSG:4326", "EPSG:2056", always_xy=True)
 
@@ -102,7 +145,28 @@ def fetch_water_bodies(
         return list(zip(e, n))
 
     all_polys = []
+    river_lines_lv95: list = []
     for elem in elements:
+        tags = elem.get("tags", {}) or {}
+        is_river_way = (
+            elem["type"] == "way"
+            and tags.get("waterway") == "river"
+        )
+        if is_river_way:
+            # Keep main rivers (by name) as LineStrings — rendered as a
+            # fixed-width ribbon by mesh.py so they survive on small prints.
+            name = (tags.get("name") or "").strip().lower()
+            if name in MAIN_RIVER_NAMES:
+                geom = elem.get("geometry", [])
+                if len(geom) >= 2:
+                    try:
+                        line = LineString(nodes_to_lv95(geom))
+                        if line.is_valid and not line.is_empty:
+                            river_lines_lv95.append(line)
+                    except Exception:
+                        pass
+            continue
+
         if elem["type"] == "way":
             geom = elem.get("geometry", [])
             if len(geom) < 3:
@@ -158,7 +222,23 @@ def fetch_water_bodies(
     else:
         polys = []
 
-    return polys
+    if river_lines_lv95:
+        # Merge segments that belong to the same river into longer LineStrings
+        # before returning, so the rendered ribbon doesn't have gaps.
+        try:
+            from shapely.ops import linemerge
+            from shapely.geometry import MultiLineString
+            merged = linemerge(MultiLineString(river_lines_lv95))
+            if isinstance(merged, LineString):
+                river_lines_lv95 = [merged]
+            else:
+                river_lines_lv95 = [g for g in merged.geoms
+                                     if isinstance(g, LineString) and not g.is_empty]
+        except Exception:
+            pass
+        print(f"  {len(river_lines_lv95)} main river segment(s) kept")
+
+    return polys, river_lines_lv95
 
 
 def _fetch_with_cache(query: str) -> list | None:

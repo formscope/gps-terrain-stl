@@ -127,6 +127,8 @@ def build_and_export(
     track_intrude_mm: float = 2.0,
     track_tolerance_mm: float = 0.2,
     water_polys_lv95: list | None = None,
+    rivers_lv95: list | None = None,
+    river_width_mm: float = 0.9,
     shape: str = "circle",
     rect_width_mm: float | None = None,
     rect_height_mm: float | None = None,
@@ -419,6 +421,64 @@ def build_and_export(
                     Zm = np.where(water_mask & (Zm > z_bot), z_bot, Zm)
 
                     water_parts_ms.append((part, z_top, z_bot))
+
+            # ----------------------------------------------------------
+            # Rivers: buffer LV95 LineStrings in model space so they
+            # render as a constant printable-width ribbon (river_width_mm).
+            # ----------------------------------------------------------
+            if rivers_lv95:
+                for river_line in rivers_lv95:
+                    try:
+                        coords_ms = []
+                        for (e, n) in river_line.coords:
+                            _dx = e - ce
+                            _dy = n - cn
+                            coords_ms.append((
+                                (_dx * rot_cos + _dy * rot_sin) * scale_xy,
+                                (-_dx * rot_sin + _dy * rot_cos) * scale_xy,
+                            ))
+                        if len(coords_ms) < 2:
+                            continue
+                        river_ms = SLineString(coords_ms).buffer(
+                            river_width_mm / 2.0,
+                            cap_style=2, join_style=1, resolution=8,
+                        )
+                        if not river_ms.is_valid:
+                            river_ms = river_ms.buffer(0)
+                    except Exception:
+                        continue
+
+                    clipped = river_ms.intersection(water_disc_shape)
+                    if clipped.is_empty:
+                        continue
+                    if track_buf_ms is not None:
+                        clipped = clipped.difference(track_buf_ms)
+                        if clipped.is_empty:
+                            continue
+
+                    parts = [g for g in (clipped.geoms if hasattr(clipped, 'geoms') else [clipped])
+                             if isinstance(g, SPolygon) and not g.is_empty
+                             and g.area >= 0.05]
+
+                    for part in parts:
+                        cent = part.centroid
+                        _u_c = cent.x / scale_xy
+                        _v_c = cent.y / scale_xy
+                        wlv95_e = ce + _u_c * rot_cos - _v_c * rot_sin
+                        wlv95_n = cn + _u_c * rot_sin + _v_c * rot_cos
+                        w_elev = interp(np.array([[wlv95_n, wlv95_e]]))[0]
+                        if np.isnan(w_elev):
+                            w_elev = elev_min
+                        z_top = (w_elev - elev_min) * scale_z + base_height_mm
+                        z_bot = z_top - plate_thickness
+
+                        carved = part.buffer(track_tolerance_mm)
+                        water_mask = shp.contains_xy(
+                            carved, Xm.ravel(), Ym.ravel()
+                        ).reshape(N, N)
+                        water_mask &= ~np.isnan(Zm)
+                        Zm = np.where(water_mask & (Zm > z_bot), z_bot, Zm)
+                        water_parts_ms.append((part, z_top, z_bot))
 
         except ImportError:
             pass

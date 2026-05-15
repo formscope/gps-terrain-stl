@@ -70,8 +70,9 @@ def generate():
     track_raise = float(request.form.get("track_raise", 0.6))
     track_intrude = float(request.form.get("track_intrude", 2.0))
     track_tolerance = float(request.form.get("track_tolerance", 0.2))
-    min_water_area = float(request.form.get("min_water_area", 500000))
+    min_water_area = float(request.form.get("min_water_area", 8_000_000))
     rivers = request.form.get("rivers") == "on"
+    river_width = float(request.form.get("river_width", 0.9))
     no_water = request.form.get("no_water") == "on"
 
     # Save uploaded file to temp dir
@@ -110,11 +111,11 @@ def generate():
         track_lv95 = list(zip(east.tolist(), north.tolist()))
         track_alts = [p[2] for p in points] if len(points[0]) > 2 else None
 
-        # Water bodies
+        # Water bodies + main rivers
         if no_water:
-            water_polys = []
+            water_polys, river_lines = [], []
         else:
-            water_polys = fetch_water_bodies(
+            water_polys, river_lines = fetch_water_bodies(
                 center_lv95, radius_m,
                 min_area_m2=min_water_area,
                 include_rivers=rivers,
@@ -164,6 +165,8 @@ def generate():
                 track_intrude_mm=track_intrude,
                 track_tolerance_mm=track_tolerance,
                 water_polys_lv95=water_polys,
+                rivers_lv95=river_lines,
+                river_width_mm=river_width,
                 shape=shape,
                 rect_width_mm=tile["rect_width_mm"],
                 rect_height_mm=tile["rect_height_mm"],

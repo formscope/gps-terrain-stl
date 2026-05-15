@@ -12,7 +12,12 @@ from flask import Flask, render_template, request, send_file, jsonify
 import numpy as np
 
 from parse import load_track
-from geometry import compute_geometry, compute_rect_geometry, wgs84_to_lv95
+from geometry import (
+    compute_geometry,
+    compute_rect_geometry,
+    compute_rect_tiles,
+    wgs84_to_lv95,
+)
 from elevation import fetch_elevation
 from mesh import build_and_export
 from water import fetch_water_bodies
@@ -115,40 +120,68 @@ def generate():
                 include_rivers=rivers,
             )
 
-        # Build mesh & export (creates separate STL files)
-        build_and_export(
-            elevation=elevation,
-            grid_info=grid_info,
-            center_lv95=center_lv95,
-            radius_m=radius_m,
-            track_lv95=track_lv95,
-            track_alts=track_alts,
-            output_path=output_path,
-            diameter_mm=diameter,
-            base_height_mm=base_height,
-            exaggeration=exaggeration,
-            track_width_mm=track_width,
-            track_raise_mm=track_raise,
-            track_intrude_mm=track_intrude,
-            track_tolerance_mm=track_tolerance,
-            water_polys_lv95=water_polys,
-            shape=shape,
-            rect_width_mm=rect_width,
-            rect_height_mm=rect_height,
-            rotation_rad=rotation_rad,
-        )
+        # For a rectangle whose long side exceeds 240 mm, split into equal
+        # tiles that fit common printer beds.  Each tile is rendered as its
+        # own watertight plate; cut edges have no margin so the geometry
+        # continues seamlessly when tiles are joined.
+        if shape == "rectangle" and max(rect_width, rect_height) > 240.0:
+            tiles = compute_rect_tiles(
+                center_lv95, radius_m, rotation_rad,
+                rect_width, rect_height, max_tile_long_mm=240.0,
+            )
+        else:
+            tiles = [{
+                "index": 1, "total": 1,
+                "center_lv95": center_lv95, "radius_m": radius_m,
+                "rect_width_mm": rect_width, "rect_height_mm": rect_height,
+                "cut_edges": set(),
+            }]
 
-        # Collect the separate STL part files into a ZIP (only STL files)
         stl_base = os.path.splitext(input_path)[0]
         part_suffixes = ["_terrain", "_track", "_water"]
-        stl_files = [f"{stl_base}{s}.stl" for s in part_suffixes
-                      if os.path.exists(f"{stl_base}{s}.stl")]
+        stl_files: list[tuple[str, str]] = []  # (disk path, arcname)
+
+        for tile in tiles:
+            if tile["total"] > 1:
+                tile_label = f"_tile{tile['index']}of{tile['total']}"
+            else:
+                tile_label = ""
+            tile_output = f"{stl_base}{tile_label}.stl"
+
+            build_and_export(
+                elevation=elevation,
+                grid_info=grid_info,
+                center_lv95=tile["center_lv95"],
+                radius_m=tile["radius_m"],
+                track_lv95=track_lv95,
+                track_alts=track_alts,
+                output_path=tile_output,
+                diameter_mm=diameter,
+                base_height_mm=base_height,
+                exaggeration=exaggeration,
+                track_width_mm=track_width,
+                track_raise_mm=track_raise,
+                track_intrude_mm=track_intrude,
+                track_tolerance_mm=track_tolerance,
+                water_polys_lv95=water_polys,
+                shape=shape,
+                rect_width_mm=tile["rect_width_mm"],
+                rect_height_mm=tile["rect_height_mm"],
+                rotation_rad=rotation_rad,
+                cut_edges=tile["cut_edges"] if tile["cut_edges"] else None,
+            )
+
+            tile_base = os.path.splitext(tile_output)[0]
+            for suf in part_suffixes:
+                p = f"{tile_base}{suf}.stl"
+                if os.path.exists(p):
+                    arc = f"{base_name}{tile_label}{suf}.stl"
+                    stl_files.append((p, arc))
 
         buf = io.BytesIO()
         with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
-            for stl_path in stl_files:
-                arcname = base_name + os.path.basename(stl_path)[len(os.path.basename(stl_base)):]
-                zf.write(stl_path, arcname)
+            for disk_path, arcname in stl_files:
+                zf.write(disk_path, arcname)
         buf.seek(0)
 
         return send_file(

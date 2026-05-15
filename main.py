@@ -13,7 +13,12 @@ import sys
 import numpy as np
 
 from parse import load_track
-from geometry import compute_geometry, compute_rect_geometry, wgs84_to_lv95
+from geometry import (
+    compute_geometry,
+    compute_rect_geometry,
+    compute_rect_tiles,
+    wgs84_to_lv95,
+)
 from elevation import fetch_elevation
 from mesh import build_and_export
 from water import fetch_water_bodies
@@ -130,29 +135,51 @@ def main():
                                          include_rivers=args.rivers)
         print(f"  {len(water_polys)} water polygon(s) found")
 
-    # --- Build mesh & export ---
-    print("Building mesh…")
-    build_and_export(
-        elevation=elevation,
-        grid_info=grid_info,
-        center_lv95=center_lv95,
-        radius_m=radius_m,
-        track_lv95=track_lv95,
-        track_alts=track_alts,
-        output_path=args.output,
-        diameter_mm=args.diameter,
-        base_height_mm=args.base_height,
-        exaggeration=args.exaggeration,
-        track_width_mm=args.track_width,
-        track_raise_mm=args.track_raise,
-        track_intrude_mm=args.track_intrude,
-        track_tolerance_mm=args.track_tolerance,
-        water_polys_lv95=water_polys,
-        shape=args.shape,
-        rect_width_mm=args.rect_width,
-        rect_height_mm=args.rect_height,
-        rotation_rad=rotation_rad,
-    )
+    # --- Build mesh & export (split long rectangles into ≤240 mm tiles) ---
+    if args.shape == "rectangle" and max(args.rect_width, args.rect_height) > 240.0:
+        tiles = compute_rect_tiles(
+            center_lv95, radius_m, rotation_rad,
+            args.rect_width, args.rect_height, max_tile_long_mm=240.0,
+        )
+        print(f"Splitting into {len(tiles)} tile(s) "
+              f"of <=240 mm along the long side")
+    else:
+        tiles = [{
+            "index": 1, "total": 1,
+            "center_lv95": center_lv95, "radius_m": radius_m,
+            "rect_width_mm": args.rect_width, "rect_height_mm": args.rect_height,
+            "cut_edges": set(),
+        }]
+
+    base, ext = os.path.splitext(args.output)
+    for tile in tiles:
+        if tile["total"] > 1:
+            tile_label = f"_tile{tile['index']}of{tile['total']}"
+        else:
+            tile_label = ""
+        print(f"Building mesh{(' for ' + tile_label) if tile_label else ''}…")
+        build_and_export(
+            elevation=elevation,
+            grid_info=grid_info,
+            center_lv95=tile["center_lv95"],
+            radius_m=tile["radius_m"],
+            track_lv95=track_lv95,
+            track_alts=track_alts,
+            output_path=f"{base}{tile_label}{ext}",
+            diameter_mm=args.diameter,
+            base_height_mm=args.base_height,
+            exaggeration=args.exaggeration,
+            track_width_mm=args.track_width,
+            track_raise_mm=args.track_raise,
+            track_intrude_mm=args.track_intrude,
+            track_tolerance_mm=args.track_tolerance,
+            water_polys_lv95=water_polys,
+            shape=args.shape,
+            rect_width_mm=tile["rect_width_mm"],
+            rect_height_mm=tile["rect_height_mm"],
+            rotation_rad=rotation_rad,
+            cut_edges=tile["cut_edges"] if tile["cut_edges"] else None,
+        )
     print("Done.")
 
 

@@ -131,6 +131,7 @@ def build_and_export(
     rect_width_mm: float | None = None,
     rect_height_mm: float | None = None,
     rotation_rad: float = 0.0,
+    cut_edges: set | None = None,
 ) -> None:
     """
     Build a solid terrain STL plus a track-tube body.
@@ -314,9 +315,26 @@ def build_and_export(
             # Shrink disc by 1 mm for water clipping so water polygons leave a
             # clean terrain border at the disc edge instead of running right
             # to the boundary (required for 3D printing).
-            water_disc_shape = disc_shape.buffer(-1.0)
-            if water_disc_shape.is_empty or not water_disc_shape.is_valid:
-                water_disc_shape = disc_shape
+            # For a tiled rectangle, the inset is 0 on edges that are cut
+            # boundaries between tiles, so water continues seamlessly across
+            # adjacent tiles.
+            if shape == "rectangle" and cut_edges:
+                hw = rect_width_mm / 2.0
+                hh = rect_height_mm / 2.0
+                m_left   = 0.0 if "-x" in cut_edges else 1.0
+                m_right  = 0.0 if "+x" in cut_edges else 1.0
+                m_bottom = 0.0 if "-y" in cut_edges else 1.0
+                m_top    = 0.0 if "+y" in cut_edges else 1.0
+                water_disc_shape = SPolygon([
+                    (-hw + m_left,  -hh + m_bottom),
+                    ( hw - m_right, -hh + m_bottom),
+                    ( hw - m_right,  hh - m_top),
+                    (-hw + m_left,   hh - m_top),
+                ])
+            else:
+                water_disc_shape = disc_shape.buffer(-1.0)
+                if water_disc_shape.is_empty or not water_disc_shape.is_valid:
+                    water_disc_shape = disc_shape
 
             # Build track buffer in model space for subtracting from water plates.
             # Uses the same half-width as the terrain groove so the cutout matches.
@@ -716,8 +734,18 @@ def build_and_export(
             elev = np.where(np.isnan(elev), elev_min, elev)
             return (elev - elev_min) * scale_z + base_height_mm
 
+        # Clip the track footprint to the plate's outline so tiled plates
+        # produce track segments that end flush at the cut edges.
+        try:
+            from shapely.geometry import Polygon as _SP
+            disc_clip = _SP(list(zip(ring_x.tolist(), ring_y.tolist())))
+            if not disc_clip.is_valid:
+                disc_clip = disc_clip.buffer(0)
+        except Exception:
+            disc_clip = None
         track_tris = _build_track_solid(
             tx, ty, track_width_mm, tube_raise, basis_level, _terrain_top_z,
+            clip_polygon=disc_clip,
         )
         print(f"  Track solid: {len(track_tris)} triangles")
 
@@ -943,7 +971,8 @@ def _densify_track(tx, ty, max_step_mm):
 # Track tube builder
 # ------------------------------------------------------------------
 
-def _build_track_solid(tx, ty, width_mm, raise_mm, basis_level, terrain_top_z):
+def _build_track_solid(tx, ty, width_mm, raise_mm, basis_level, terrain_top_z,
+                       clip_polygon=None):
     """
     Build a single watertight track solid using a 2-D Shapely buffer of the
     polyline.  Self-intersections (loops, lap repeats, out-and-back sections)
@@ -969,6 +998,9 @@ def _build_track_solid(tx, ty, width_mm, raise_mm, basis_level, terrain_top_z):
     line = LineString(coords)
     # round/round caps so two passes meeting at any angle merge cleanly
     footprint = line.buffer(width_mm / 2.0, cap_style=1, join_style=1, resolution=8)
+
+    if clip_polygon is not None and not footprint.is_empty:
+        footprint = footprint.intersection(clip_polygon)
 
     if footprint.is_empty:
         return []

@@ -122,3 +122,87 @@ def compute_rect_geometry(
     radius_m = radius_mm_grid / scale
 
     return (ce, cn), float(radius_m), float(rotation_rad)
+
+
+def compute_rect_tiles(
+    center_full_lv95: tuple[float, float],
+    radius_m_full: float,
+    rotation_rad: float,
+    rect_width_mm: float,
+    rect_height_mm: float,
+    max_tile_long_mm: float = 240.0,
+) -> list[dict]:
+    """
+    Split a rectangular plate whose long side exceeds max_tile_long_mm into
+    equal-sized tiles that each fit within the limit.  Each tile is described
+    by its own LV95 centre, effective LV95 'radius', rectangle dimensions
+    (model space), and the set of edge identifiers that are flush cuts
+    between adjacent tiles.
+
+    Returns a list of dicts (one per tile, in order along the long axis):
+        {
+          "index": int (1-based),
+          "total": int,
+          "center_lv95": (E, N),
+          "radius_m": float,
+          "rect_width_mm": float,
+          "rect_height_mm": float,
+          "cut_edges": set[str],   # subset of {'-x','+x','-y','+y'}
+        }
+    """
+    long_side = max(rect_width_mm, rect_height_mm)
+    short_side = min(rect_width_mm, rect_height_mm)
+    n_tiles = max(1, int(np.ceil(long_side / max_tile_long_mm)))
+    tile_long = long_side / n_tiles
+    long_is_x = (rect_width_mm >= rect_height_mm)
+
+    # Same model-space scale across tiles; preserves the track size.
+    radius_mm_full = max(rect_width_mm, rect_height_mm) / 2.0
+    scale_xy_full = radius_mm_full / radius_m_full
+
+    cos_t = float(np.cos(rotation_rad))
+    sin_t = float(np.sin(rotation_rad))
+
+    tiles = []
+    for i in range(n_tiles):
+        offset_long_mm = (i - (n_tiles - 1) / 2.0) * tile_long
+
+        # Tile centre in LV95: shift along the long axis (in model space)
+        # back through rotation+scale.
+        if long_is_x:
+            de = (offset_long_mm / scale_xy_full) * cos_t
+            dn = (offset_long_mm / scale_xy_full) * sin_t
+            tile_w = tile_long
+            tile_h = short_side
+        else:
+            de = (offset_long_mm / scale_xy_full) * (-sin_t)
+            dn = (offset_long_mm / scale_xy_full) * cos_t
+            tile_w = short_side
+            tile_h = tile_long
+
+        tile_center = (center_full_lv95[0] + de, center_full_lv95[1] + dn)
+        tile_radius_mm = max(tile_w, tile_h) / 2.0
+        tile_radius_m = tile_radius_mm / scale_xy_full
+
+        cut_edges: set[str] = set()
+        if long_is_x:
+            if i > 0:
+                cut_edges.add("-x")
+            if i < n_tiles - 1:
+                cut_edges.add("+x")
+        else:
+            if i > 0:
+                cut_edges.add("-y")
+            if i < n_tiles - 1:
+                cut_edges.add("+y")
+
+        tiles.append({
+            "index": i + 1,
+            "total": n_tiles,
+            "center_lv95": tile_center,
+            "radius_m": tile_radius_m,
+            "rect_width_mm": tile_w,
+            "rect_height_mm": tile_h,
+            "cut_edges": cut_edges,
+        })
+    return tiles

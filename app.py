@@ -12,7 +12,7 @@ from flask import Flask, render_template, request, send_file, jsonify
 import numpy as np
 
 from parse import load_track
-from geometry import compute_geometry, wgs84_to_lv95
+from geometry import compute_geometry, compute_rect_geometry, wgs84_to_lv95
 from elevation import fetch_elevation
 from mesh import build_and_export
 from water import fetch_water_bodies
@@ -81,8 +81,19 @@ def generate():
         # Load track
         points = load_track(input_path)
 
-        # Geometry
-        center_lv95, radius_m = compute_geometry(points, padding=padding)
+        # Geometry — for rectangle we orient the track's long axis along the
+        # rectangle's long side and force a 20 mm edge margin.
+        if shape == "rectangle":
+            # 20 mm minimum gap between track edge and plate edge, so the
+            # margin must account for half the track tube width.
+            rect_edge_margin_mm = 20.0 + track_width / 2.0
+            center_lv95, radius_m, rotation_rad = compute_rect_geometry(
+                points, rect_width, rect_height,
+                edge_margin_mm=rect_edge_margin_mm,
+            )
+        else:
+            center_lv95, radius_m = compute_geometry(points, padding=padding)
+            rotation_rad = 0.0
 
         # Elevation
         elevation, grid_info = fetch_elevation(center_lv95, radius_m, resolution)
@@ -124,6 +135,7 @@ def generate():
             shape=shape,
             rect_width_mm=rect_width,
             rect_height_mm=rect_height,
+            rotation_rad=rotation_rad,
         )
 
         # Collect the separate STL part files into a ZIP (only STL files)

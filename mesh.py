@@ -130,6 +130,7 @@ def build_and_export(
     shape: str = "circle",
     rect_width_mm: float | None = None,
     rect_height_mm: float | None = None,
+    rotation_rad: float = 0.0,
 ) -> None:
     """
     Build a solid terrain STL plus a track-tube body.
@@ -153,6 +154,13 @@ def build_and_export(
         radius_mm = diameter_mm / 2.0
     scale_xy = radius_mm / radius_m
 
+    # Rotation matrix (LV95 ↔ model). For all shapes except rectangle, rotation
+    # is 0.  For rectangle, app.py / main.py choose an angle that aligns the
+    # track's long axis with the rectangle's long side.
+    import math as _math
+    rot_cos = _math.cos(rotation_rad)
+    rot_sin = _math.sin(rotation_rad)
+
     # ------------------------------------------------------------------
     # 1. Elevation interpolator (LV95 coords → metres above sea level)
     # ------------------------------------------------------------------
@@ -175,8 +183,11 @@ def build_and_export(
     Xm, Ym = np.meshgrid(lin, lin[::-1])   # row 0 = north
     pixel_size_mm = 2.0 * radius_mm / N
 
-    E_grid = ce + Xm / scale_xy
-    N_grid = cn + Ym / scale_xy
+    # Inverse transform: unscale, un-rotate, un-centre.
+    _u = Xm / scale_xy
+    _v = Ym / scale_xy
+    E_grid = ce + _u * rot_cos - _v * rot_sin
+    N_grid = cn + _u * rot_sin + _v * rot_cos
 
     ring_x, ring_y, inside_func = _generate_shape_ring(
         shape, radius_mm, N,
@@ -218,8 +229,11 @@ def build_and_export(
     if track_lv95:
         track_e = np.array([p[0] for p in track_lv95])
         track_n = np.array([p[1] for p in track_lv95])
-        tx = (track_e - ce) * scale_xy
-        ty = (track_n - cn) * scale_xy
+        # Forward transform: centre, rotate, scale.
+        _dx = track_e - ce
+        _dy = track_n - cn
+        tx = (_dx * rot_cos + _dy * rot_sin) * scale_xy
+        ty = (-_dx * rot_sin + _dy * rot_cos) * scale_xy
 
         if track_alts is not None:
             # IGC: use real GPS altitude mapped through the same scale as terrain
@@ -330,9 +344,16 @@ def build_and_export(
 
             for poly_lv95 in water_polys_lv95:
                 ext = list(poly_lv95.exterior.coords)
-                ext_ms = [((e - ce) * scale_xy, (n - cn) * scale_xy) for e, n in ext]
+                def _lv95_to_model(_e, _n):
+                    _dx = _e - ce
+                    _dy = _n - cn
+                    return (
+                        (_dx * rot_cos + _dy * rot_sin) * scale_xy,
+                        (-_dx * rot_sin + _dy * rot_cos) * scale_xy,
+                    )
+                ext_ms = [_lv95_to_model(e, n) for e, n in ext]
                 holes_ms = [
-                    [((e - ce) * scale_xy, (n - cn) * scale_xy) for e, n in ring.coords]
+                    [_lv95_to_model(e, n) for e, n in ring.coords]
                     for ring in poly_lv95.interiors
                 ]
                 try:
@@ -361,8 +382,10 @@ def build_and_export(
                 for part in parts:
                     # Sample terrain elevation at centroid for plate height
                     cent = part.centroid
-                    wlv95_e = ce + cent.x / scale_xy
-                    wlv95_n = cn + cent.y / scale_xy
+                    _u_c = cent.x / scale_xy
+                    _v_c = cent.y / scale_xy
+                    wlv95_e = ce + _u_c * rot_cos - _v_c * rot_sin
+                    wlv95_n = cn + _u_c * rot_sin + _v_c * rot_cos
                     w_elev = interp(np.array([[wlv95_n, wlv95_e]]))[0]
                     if np.isnan(w_elev):
                         w_elev = elev_min
@@ -388,8 +411,10 @@ def build_and_export(
     # ring_x, ring_y, N_ring already set by _generate_shape_ring()
 
     # Interpolate elevation at ring vertices
-    ring_E = ce + ring_x / scale_xy
-    ring_N = cn + ring_y / scale_xy
+    _u_ring = ring_x / scale_xy
+    _v_ring = ring_y / scale_xy
+    ring_E = ce + _u_ring * rot_cos - _v_ring * rot_sin
+    ring_N = cn + _u_ring * rot_sin + _v_ring * rot_cos
     ring_elev = interp(np.stack([ring_N, ring_E], axis=1))
     ring_elev = np.where(np.isnan(ring_elev), elev_min, ring_elev)
     ring_z = (ring_elev - elev_min) * scale_z + base_height_mm
@@ -439,8 +464,10 @@ def build_and_export(
 
     # Helper: terrain z (model space) at any (x_mm, y_mm) via the LV95 interp.
     def _terrain_z(x_mm, y_mm):
-        E = ce + x_mm / scale_xy
-        Nn = cn + y_mm / scale_xy
+        _u = x_mm / scale_xy
+        _v = y_mm / scale_xy
+        E = ce + _u * rot_cos - _v * rot_sin
+        Nn = cn + _u * rot_sin + _v * rot_cos
         elev = float(interp(np.array([[Nn, E]]))[0])
         if np.isnan(elev):
             elev = elev_min
@@ -681,8 +708,10 @@ def build_and_export(
         # Bottom is the constant basis_level plane (flat underside).
         def _terrain_top_z(xs_mm, ys_mm):
             """Vectorised terrain z (model space) for an array of (x,y) in mm."""
-            E = ce + np.asarray(xs_mm) / scale_xy
-            N = cn + np.asarray(ys_mm) / scale_xy
+            _u = np.asarray(xs_mm) / scale_xy
+            _v = np.asarray(ys_mm) / scale_xy
+            E = ce + _u * rot_cos - _v * rot_sin
+            N = cn + _u * rot_sin + _v * rot_cos
             elev = interp(np.stack([N, E], axis=-1))
             elev = np.where(np.isnan(elev), elev_min, elev)
             return (elev - elev_min) * scale_z + base_height_mm

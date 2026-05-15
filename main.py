@@ -13,7 +13,7 @@ import sys
 import numpy as np
 
 from parse import load_track
-from geometry import compute_geometry, wgs84_to_lv95
+from geometry import compute_geometry, compute_rect_geometry, wgs84_to_lv95
 from elevation import fetch_elevation
 from mesh import build_and_export
 from water import fetch_water_bodies
@@ -89,7 +89,18 @@ def main():
 
     # --- Geometry ---
     print("Computing geometry…")
-    center_lv95, radius_m = compute_geometry(points, padding=args.padding)
+    if args.shape == "rectangle":
+        # 20 mm gap is measured to the track edge → margin accounts for the
+        # track tube half-width too.
+        rect_edge_margin_mm = 20.0 + args.track_width / 2.0
+        center_lv95, radius_m, rotation_rad = compute_rect_geometry(
+            points, args.rect_width, args.rect_height,
+            edge_margin_mm=rect_edge_margin_mm,
+        )
+        print(f"  Rectangle orientation: {np.degrees(rotation_rad):.1f}°")
+    else:
+        center_lv95, radius_m = compute_geometry(points, padding=args.padding)
+        rotation_rad = 0.0
     ce, cn = center_lv95
     print(f"  Centre (LV95):  E={ce:.0f} m,  N={cn:.0f} m")
     print(f"  Radius (padded): {radius_m:.0f} m  ({radius_m/1000:.2f} km)")
@@ -140,6 +151,7 @@ def main():
         shape=args.shape,
         rect_width_mm=args.rect_width,
         rect_height_mm=args.rect_height,
+        rotation_rad=rotation_rad,
     )
     print("Done.")
 

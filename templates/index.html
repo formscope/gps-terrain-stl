@@ -607,19 +607,17 @@
         const JSZip = JSZipModule.default || JSZipModule;
         const zip = await JSZip.loadAsync(blob);
 
-        const stlBuffers = [];
+        const stlEntries = [];   // [{ name, buf }]
         const stlNames = [];
-        zip.forEach((path, entry) => {
-          if (path.endsWith('.stl')) {
-            stlNames.push(path);
-          }
+        zip.forEach((path) => {
+          if (path.endsWith('.stl')) stlNames.push(path);
         });
         for (const name of stlNames) {
           const buf = await zip.file(name).async('arraybuffer');
-          stlBuffers.push(buf);
+          stlEntries.push({ name, buf });
         }
-        if (stlBuffers.length > 0) {
-          showSTLMultiple(stlBuffers);
+        if (stlEntries.length > 0) {
+          showSTLMultiple(stlEntries);
         }
 
         viewerWrapper.classList.add('visible');
@@ -713,7 +711,23 @@
       water:   0x4499dd,
     };
 
-    window.showSTLMultiple = function(arrayBuffers) {
+    function classifyPart(name) {
+      const lower = name.toLowerCase();
+      if (lower.endsWith('_terrain.stl')) return 'terrain';
+      if (lower.endsWith('_track.stl'))   return 'track';
+      if (lower.endsWith('_water.stl'))   return 'water';
+      return 'terrain';
+    }
+
+    function tileKey(name) {
+      // Matches "_tile<N>of<M>" anywhere in the filename. Returns
+      // {index, total} or null if the file is not a tile.
+      const m = name.match(/_tile(\d+)of(\d+)/i);
+      if (!m) return null;
+      return { index: parseInt(m[1], 10), total: parseInt(m[2], 10) };
+    }
+
+    window.showSTLMultiple = function(entries) {
       initViewer();
 
       // Remove previous meshes
@@ -727,31 +741,73 @@
       currentMesh = [];
 
       const loader = new STLLoader();
-      const group = new THREE.Group();
-      const partKeys = ['terrain', 'track', 'water'];
 
-      arrayBuffers.forEach((buf, i) => {
-        const geometry = loader.parse(buf);
-        geometry.computeVertexNormals();
-        const key = partKeys[i] || 'terrain';
-        const material = new THREE.MeshStandardMaterial({
-          color: partColors[key],
-          metalness: 0.1,
-          roughness: 0.65,
-          flatShading: false,
-        });
-        const mesh = new THREE.Mesh(geometry, material);
-        group.add(mesh);
-        currentMesh.push(mesh);
+      // Group entries by tile. Each tile becomes its own THREE.Group so we
+      // can offset them side-by-side along the long axis.
+      const tiles = new Map();   // key: tileIndex (1-based, or 0 for non-tiled)
+      let total = 1;
+      entries.forEach(({ name, buf }) => {
+        const tk = tileKey(name);
+        const idx = tk ? tk.index : 0;
+        if (tk) total = Math.max(total, tk.total);
+        if (!tiles.has(idx)) tiles.set(idx, []);
+        tiles.get(idx).push({ name, buf });
       });
 
-      scene.add(group);
+      const tileGroups = [];
+      [...tiles.keys()].sort((a, b) => a - b).forEach((idx) => {
+        const tileGroup = new THREE.Group();
+        tileGroup.userData.tileIndex = idx;
+        tiles.get(idx).forEach(({ name, buf }) => {
+          const geometry = loader.parse(buf);
+          geometry.computeVertexNormals();
+          const key = classifyPart(name);
+          const material = new THREE.MeshStandardMaterial({
+            color: partColors[key],
+            metalness: 0.1,
+            roughness: 0.65,
+            flatShading: false,
+          });
+          const mesh = new THREE.Mesh(geometry, material);
+          tileGroup.add(mesh);
+          currentMesh.push(mesh);
+        });
+        tileGroups.push(tileGroup);
+      });
 
-      // Centre and fit camera on the whole group
-      const box = new THREE.Box3().setFromObject(group);
+      const parent = new THREE.Group();
+
+      // For a single tile, render at origin.  For multiple tiles, place
+      // each tile next to the previous one along its long axis, with a
+      // small visible gap so the seam is recognisable in the preview.
+      if (tileGroups.length === 1) {
+        parent.add(tileGroups[0]);
+      } else {
+        // Use the first tile to discover the long axis and tile span.
+        const probeBox = new THREE.Box3().setFromObject(tileGroups[0]);
+        const probeSize = new THREE.Vector3();
+        probeBox.getSize(probeSize);
+        const longAxisX = probeSize.x >= probeSize.y;
+        const tileLong = longAxisX ? probeSize.x : probeSize.y;
+        const gap = Math.max(1.0, tileLong * 0.02);   // ~2 % of tile length
+
+        const step = tileLong + gap;
+        const center = (tileGroups.length - 1) / 2;
+        tileGroups.forEach((g, i) => {
+          const off = (i - center) * step;
+          if (longAxisX) g.position.x = off;
+          else           g.position.y = off;
+          parent.add(g);
+        });
+      }
+
+      scene.add(parent);
+
+      // Centre and fit camera on the whole arrangement
+      const box = new THREE.Box3().setFromObject(parent);
       const center = new THREE.Vector3();
       box.getCenter(center);
-      group.position.sub(center);
+      parent.position.sub(center);
 
       const size = new THREE.Vector3();
       box.getSize(size);
@@ -766,7 +822,7 @@
 
     // Backward compat for single STL
     window.showSTL = function(arrayBuffer) {
-      window.showSTLMultiple([arrayBuffer]);
+      window.showSTLMultiple([{ name: 'terrain.stl', buf: arrayBuffer }]);
     };
   </script>
 </body>

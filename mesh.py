@@ -5,15 +5,20 @@ import numpy as np
 from scipy.interpolate import RegularGridInterpolator
 from stl import mesh as stl_mesh
 
-VALID_SHAPES = ("circle", "square", "hexagon")
+VALID_SHAPES = ("circle", "square", "hexagon", "rectangle")
 
 
-def _generate_shape_ring(shape: str, radius_mm: float, N: int):
+def _generate_shape_ring(shape: str, radius_mm: float, N: int,
+                          width_mm: float | None = None,
+                          height_mm: float | None = None):
     """
     Return (ring_x, ring_y, inside_mask_func) for the given shape.
 
     ring_x, ring_y: 1-D arrays of boundary vertices (closed smooth ring).
     inside_func(Xm, Ym, shrink) -> bool mask: True where grid point is inside shape.
+
+    width_mm / height_mm are only consulted for shape='rectangle'; the other
+    shapes use the symmetric `radius_mm` (half-diameter).
     """
     if shape == "circle":
         N_ring = max(720, N * 2)
@@ -74,6 +79,32 @@ def _generate_shape_ring(shape: str, radius_mm: float, N: int):
             d3 = np.abs(Xm * 0.5 - Ym * (np.sqrt(3) / 2))
             return (d1 <= R) & (d2 <= R) & (d3 <= R)
 
+    elif shape == "rectangle":
+        # Axis-aligned rectangle: width × height (mm), centred at origin.
+        if width_mm is None or height_mm is None:
+            raise ValueError("rectangle shape requires width_mm and height_mm")
+        hw = width_mm / 2.0
+        hh = height_mm / 2.0
+        pts_per_side = max(180, N // 2)
+        ring_x_list, ring_y_list = [], []
+        # bottom edge: left to right
+        ring_x_list.extend(np.linspace(-hw, hw, pts_per_side, endpoint=False))
+        ring_y_list.extend(np.full(pts_per_side, -hh))
+        # right edge: bottom to top
+        ring_x_list.extend(np.full(pts_per_side, hw))
+        ring_y_list.extend(np.linspace(-hh, hh, pts_per_side, endpoint=False))
+        # top edge: right to left
+        ring_x_list.extend(np.linspace(hw, -hw, pts_per_side, endpoint=False))
+        ring_y_list.extend(np.full(pts_per_side, hh))
+        # left edge: top to bottom
+        ring_x_list.extend(np.full(pts_per_side, -hw))
+        ring_y_list.extend(np.linspace(hh, -hh, pts_per_side, endpoint=False))
+        ring_x = np.array(ring_x_list)
+        ring_y = np.array(ring_y_list)
+
+        def inside_func(Xm, Ym, shrink):
+            return (np.abs(Xm) <= (hw - shrink)) & (np.abs(Ym) <= (hh - shrink))
+
     else:
         raise ValueError(f"Unknown shape '{shape}'. Use one of {VALID_SHAPES}")
 
@@ -97,18 +128,29 @@ def build_and_export(
     track_tolerance_mm: float = 0.2,
     water_polys_lv95: list | None = None,
     shape: str = "circle",
+    rect_width_mm: float | None = None,
+    rect_height_mm: float | None = None,
 ) -> None:
     """
     Build a solid terrain STL plus a track-tube body.
 
     The terrain is centred at (0,0), radius = diameter_mm/2.
-    Shape can be 'circle', 'square', or 'hexagon'.
+    Shape can be 'circle', 'square', 'hexagon', or 'rectangle'.
+    For 'rectangle', rect_width_mm and rect_height_mm specify the side
+    lengths; diameter_mm is ignored.
     A groove is carved into the terrain along the track path with width
     (track_width + 2*tolerance) down to basis_level, so the track tube
     fits without intersection.
     """
     ce, cn = center_lv95
-    radius_mm = diameter_mm / 2.0
+    if shape == "rectangle":
+        if rect_width_mm is None or rect_height_mm is None:
+            raise ValueError("rectangle shape requires rect_width_mm and rect_height_mm")
+        # Grid is square, sized to the larger side; ring & inside-mask use the
+        # rectangular extents.  radius_mm is the half-extent of the *grid*.
+        radius_mm = max(rect_width_mm, rect_height_mm) / 2.0
+    else:
+        radius_mm = diameter_mm / 2.0
     scale_xy = radius_mm / radius_m
 
     # ------------------------------------------------------------------
@@ -136,7 +178,10 @@ def build_and_export(
     E_grid = ce + Xm / scale_xy
     N_grid = cn + Ym / scale_xy
 
-    ring_x, ring_y, inside_func = _generate_shape_ring(shape, radius_mm, N)
+    ring_x, ring_y, inside_func = _generate_shape_ring(
+        shape, radius_mm, N,
+        width_mm=rect_width_mm, height_mm=rect_height_mm,
+    )
     N_ring = len(ring_x)
     # Shrink mask by one pixel so the grid sits fully inside the boundary ring
     inside = inside_func(Xm, Ym, pixel_size_mm)

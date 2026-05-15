@@ -381,6 +381,11 @@
             <svg viewBox="0 0 40 40"><polygon points="20,2 36,11 36,29 20,38 4,29 4,11"/></svg>
             <span>Hexagon</span>
           </label>
+          <label class="shape-option" data-shape="rectangle">
+            <input type="radio" name="shape" value="rectangle">
+            <svg viewBox="0 0 40 40"><rect x="2" y="10" width="36" height="20" rx="1"/></svg>
+            <span>Rectangle</span>
+          </label>
         </div>
       </div>
 
@@ -388,9 +393,19 @@
       <div class="section">
         <div class="section-title">Disc Settings</div>
         <div class="form-grid">
-          <div class="form-group">
+          <div class="form-group" id="diameter_group">
             <label for="diameter">Diameter</label>
             <input type="number" id="diameter" name="diameter" value="100" step="1" min="10" max="300">
+            <span class="unit">mm</span>
+          </div>
+          <div class="form-group" id="rect_width_group" style="display:none;">
+            <label for="rect_width">Breite</label>
+            <input type="number" id="rect_width" name="rect_width" value="100" step="1" min="10" max="300">
+            <span class="unit">mm</span>
+          </div>
+          <div class="form-group" id="rect_height_group" style="display:none;">
+            <label for="rect_height">Höhe</label>
+            <input type="number" id="rect_height" name="rect_height" value="60" step="1" min="10" max="300">
             <span class="unit">mm</span>
           </div>
           <div class="form-group">
@@ -517,14 +532,23 @@
 
     fileInput.addEventListener('change', onFileSelected);
 
-    // Shape selector
+    // Shape selector — also toggle Diameter vs Rectangle dimension fields.
+    function updateShapeFields() {
+      const shape = document.querySelector('input[name="shape"]:checked').value;
+      const isRect = (shape === 'rectangle');
+      document.getElementById('diameter_group').style.display = isRect ? 'none' : '';
+      document.getElementById('rect_width_group').style.display = isRect ? '' : 'none';
+      document.getElementById('rect_height_group').style.display = isRect ? '' : 'none';
+    }
     document.querySelectorAll('.shape-option').forEach(opt => {
       opt.addEventListener('click', () => {
         document.querySelectorAll('.shape-option').forEach(o => o.classList.remove('active'));
         opt.classList.add('active');
         opt.querySelector('input[type="radio"]').checked = true;
+        updateShapeFields();
       });
     });
+    updateShapeFields();
 
     function onFileSelected() {
       const file = fileInput.files[0];

@@ -54,9 +54,13 @@ def main():
                         help="Include rivers and riverbanks as water plates (disabled by default)")
     parser.add_argument("--no-water", action="store_true",
                         help="Skip water body detection and plates")
-    parser.add_argument("--shape", choices=["circle", "square", "hexagon"],
+    parser.add_argument("--shape", choices=["circle", "square", "hexagon", "rectangle"],
                         default="circle",
-                        help="Shape of the terrain disc (circle, square, or hexagon)")
+                        help="Shape of the terrain plate")
+    parser.add_argument("--rect-width", type=float, default=100.0,
+                        help="Rectangle width in mm (only when --shape=rectangle)")
+    parser.add_argument("--rect-height", type=float, default=60.0,
+                        help="Rectangle height in mm (only when --shape=rectangle)")
     args = parser.parse_args()
 
     if args.output is None:
@@ -64,12 +68,16 @@ def main():
 
     # Derive padding from edge margin if not explicitly provided.
     # Shape-aware: hexagon's inscribed circle is smaller than its circumradius,
-    # so the usable track radius shrinks accordingly.
+    # and a rectangle is bounded by its shorter side.
     if args.padding is None:
-        disc_radius_mm = args.diameter / 2.0
-        if args.shape == "hexagon":
+        if args.shape == "rectangle":
+            disc_radius_mm = max(args.rect_width, args.rect_height) / 2.0
+            inscribed_radius_mm = min(args.rect_width, args.rect_height) / 2.0
+        elif args.shape == "hexagon":
+            disc_radius_mm = args.diameter / 2.0
             inscribed_radius_mm = disc_radius_mm * (3 ** 0.5) / 2.0
         else:
+            disc_radius_mm = args.diameter / 2.0
             inscribed_radius_mm = disc_radius_mm
         track_radius_mm = max(inscribed_radius_mm - args.edge_margin, 1.0)
         args.padding = (disc_radius_mm - track_radius_mm) / track_radius_mm
@@ -130,6 +138,8 @@ def main():
         track_tolerance_mm=args.track_tolerance,
         water_polys_lv95=water_polys,
         shape=args.shape,
+        rect_width_mm=args.rect_width,
+        rect_height_mm=args.rect_height,
     )
     print("Done.")
 

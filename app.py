@@ -38,19 +38,25 @@ def generate():
     # Read parameters from form
     diameter = float(request.form.get("diameter", 100.0))
     shape = request.form.get("shape", "circle")
-    if shape not in ("circle", "square", "hexagon"):
+    if shape not in ("circle", "square", "hexagon", "rectangle"):
         shape = "circle"
+    # Rectangle dimensions (only used when shape == "rectangle").
+    rect_width = float(request.form.get("rect_width", 100.0))
+    rect_height = float(request.form.get("rect_height", 60.0))
     # Edge margin in mm: minimum distance between outermost track point and disc edge.
-    # Shape-aware: the inscribed-circle radius is smaller than the half-diameter
-    # for a hexagon, so we reduce the usable radius accordingly.
+    # Shape-aware: the inscribed-circle radius is smaller than the half-extent for
+    # a hexagon, and for a rectangle is set by the shorter side.
     edge_margin_mm = float(request.form.get("edge_margin", 10.0))
-    disc_radius_mm = diameter / 2.0
-    if shape == "hexagon":
+    if shape == "rectangle":
+        disc_radius_mm = max(rect_width, rect_height) / 2.0
+        inscribed_radius_mm = min(rect_width, rect_height) / 2.0
+    elif shape == "hexagon":
+        disc_radius_mm = diameter / 2.0
         inscribed_radius_mm = disc_radius_mm * (3 ** 0.5) / 2.0
     else:
+        disc_radius_mm = diameter / 2.0
         inscribed_radius_mm = disc_radius_mm
     track_radius_mm = max(inscribed_radius_mm - edge_margin_mm, 1.0)
-    # padding is defined relative to the circumscribed disc radius (same as before)
     padding = (disc_radius_mm - track_radius_mm) / track_radius_mm
     exaggeration = float(request.form.get("exaggeration", 1.0))
     resolution = int(request.form.get("resolution", 512))
@@ -116,6 +122,8 @@ def generate():
             track_tolerance_mm=track_tolerance,
             water_polys_lv95=water_polys,
             shape=shape,
+            rect_width_mm=rect_width,
+            rect_height_mm=rect_height,
         )
 
         # Collect the separate STL part files into a ZIP (only STL files)

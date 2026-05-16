@@ -809,13 +809,28 @@ def build_and_export(
 
     tri_dt = Delaunay(all_xy)
 
-    # Keep only triangles that span the annular gap (have both ring and grid verts)
-    # and lie inside the shape boundary
+    # Keep triangles that lie inside the annular gap:
+    #   * mixed (ring + grid verts): the usual stitch
+    #   * tiny ring-only triangles: the small wedges that form at sharp
+    #     corners of a rectangle / hexagon ring (corner vertex + two
+    #     near-neighbours).  Without these the corner has no top face.
+    # Large ring-only triangles (diagonals that span the disc) are still
+    # discarded.
+    max_corner_area = (pixel_size_mm * 3.0) ** 2
     for simplex in tri_dt.simplices:
         has_ring = any(is_ring[i] for i in simplex)
         has_grid = any(not is_ring[i] for i in simplex)
-        if not (has_ring and has_grid):
-            continue
+        if not has_ring:
+            continue                       # purely interior — section 4 owns it
+        if not has_grid:
+            xs = all_xy[simplex, 0]
+            ys = all_xy[simplex, 1]
+            tri_area = 0.5 * abs(
+                (xs[1] - xs[0]) * (ys[2] - ys[0])
+                - (xs[2] - xs[0]) * (ys[1] - ys[0])
+            )
+            if tri_area > max_corner_area:
+                continue                   # huge ring-only diagonal: skip
         # Check centroid is inside the shape (with generous margin)
         cx = all_xy[simplex, 0].mean()
         cy = all_xy[simplex, 1].mean()

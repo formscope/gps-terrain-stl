@@ -203,19 +203,17 @@ def build_and_export(
     query_pts = np.stack([N_grid[inside], E_grid[inside]], axis=1)
     elev_vals = interp(query_pts)
 
-    if np.any(np.isnan(elev_vals)):
-        valid = ~np.isnan(elev_vals)
-        if valid.any():
-            from scipy.spatial import cKDTree
-            tree = cKDTree(query_pts[valid])
-            bad = np.where(~valid)[0]
-            _, nn = tree.query(query_pts[bad])
-            elev_vals[bad] = elev_vals[valid][nn]
-        else:
-            elev_vals[:] = 0.0
+    # Pixels with NaN elevation are treated as sea: the global Copernicus DEM
+    # uses NODATA over the ocean.  We mark them, then clamp them to 0 m so
+    # they show up as a flat sea-level plate in the mesh.
+    sea_pixel_mask_1d = np.isnan(elev_vals)
+    if sea_pixel_mask_1d.any():
+        elev_vals[sea_pixel_mask_1d] = 0.0
 
     Z_elev = np.full((N, N), np.nan)
     Z_elev[inside] = elev_vals
+    Z_sea = np.zeros((N, N), dtype=bool)
+    Z_sea[inside] = sea_pixel_mask_1d
     elev_min = np.nanmin(Z_elev)
     scale_z = scale_xy * exaggeration
 
@@ -299,7 +297,45 @@ def build_and_export(
     # ------------------------------------------------------------------
     water_parts_ms = []   # (shapely Polygon in model space, z_top, z_bot)
 
-    if water_polys_lv95 or rivers_lv95:
+    # ------------------------------------------------------------------
+    # Sea: pixels with NaN in the source DEM (= ocean in Copernicus).
+    # We turn them into shapely polygons in model space and feed them
+    # through the same water-plate pipeline as lakes.
+    # ------------------------------------------------------------------
+    sea_polys_ms: list = []
+    if Z_sea.any():
+        try:
+            import rasterio.features as _rfeat
+            from rasterio.transform import Affine as _Affine
+            from shapely.geometry import shape as _sh_shape, Polygon as _SPoly
+            pixel_size_mm = 2.0 * radius_mm / N
+            # Pixel (col, row) → model (x, y). Row 0 is the top of the
+            # grid (y = +radius_mm). Apply the same orientation as Xm/Ym.
+            sea_transform = (
+                _Affine.translation(-radius_mm, radius_mm)
+                * _Affine.scale(pixel_size_mm, -pixel_size_mm)
+            )
+            for geom_dict, val in _rfeat.shapes(
+                Z_sea.astype("uint8"), mask=Z_sea, transform=sea_transform,
+            ):
+                if val != 1:
+                    continue
+                try:
+                    p = _sh_shape(geom_dict)
+                    if not p.is_valid:
+                        p = p.buffer(0)
+                    if p.is_empty or not isinstance(p, _SPoly):
+                        continue
+                    # Smooth pixel stairsteps; drop slivers below 25 mm².
+                    p = p.buffer(pixel_size_mm * 0.6).buffer(-pixel_size_mm * 0.6)
+                    if p.is_valid and not p.is_empty and p.area >= 25.0:
+                        sea_polys_ms.append(p)
+                except Exception:
+                    continue
+        except Exception:
+            sea_polys_ms = []
+
+    if water_polys_lv95 or rivers_lv95 or sea_polys_ms:
         try:
             import shapely as shp
             from shapely.geometry import Point as SPoint, Polygon as SPolygon, \
@@ -472,6 +508,35 @@ def build_and_export(
                         z_top = (w_elev - elev_min) * scale_z + base_height_mm
                         z_bot = z_top - plate_thickness
 
+                        carved = part.buffer(track_tolerance_mm)
+                        water_mask = shp.contains_xy(
+                            carved, Xm.ravel(), Ym.ravel()
+                        ).reshape(N, N)
+                        water_mask &= ~np.isnan(Zm)
+                        Zm = np.where(water_mask & (Zm > z_bot), z_bot, Zm)
+                        water_parts_ms.append((part, z_top, z_bot))
+
+            # ----------------------------------------------------------
+            # Sea (already in model space from the NaN-pixel detector).
+            # Sea level is z = base_height_mm (the actual 0 m elevation
+            # maps there once elev_min has been subtracted), so the sea
+            # plate sits flush with the lowest point of the terrain.
+            # ----------------------------------------------------------
+            if sea_polys_ms:
+                z_top = (0.0 - elev_min) * scale_z + base_height_mm
+                z_bot = z_top - plate_thickness
+                for sea_poly in sea_polys_ms:
+                    clipped = sea_poly.intersection(water_disc_shape)
+                    if clipped.is_empty:
+                        continue
+                    if track_buf_ms is not None:
+                        clipped = clipped.difference(track_buf_ms)
+                        if clipped.is_empty:
+                            continue
+                    parts = [g for g in (clipped.geoms if hasattr(clipped, "geoms") else [clipped])
+                             if isinstance(g, SPolygon) and not g.is_empty
+                             and g.area >= 1.0]
+                    for part in parts:
                         carved = part.buffer(track_tolerance_mm)
                         water_mask = shp.contains_xy(
                             carved, Xm.ravel(), Ym.ravel()

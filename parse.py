@@ -33,7 +33,60 @@ def _parse_gpx(path: Path) -> list[tuple[float, float]]:
 
     if not points:
         raise ValueError("No track points found in GPX file")
-    return points
+
+    cleaned = _clean_track(points)
+    if len(cleaned) < len(points):
+        print(f"  GPX: {len(points)} raw points -> {len(cleaned)} after dedup / spike removal")
+    return cleaned
+
+
+def _clean_track(points: list[tuple[float, float]],
+                 dup_tol_deg: float = 1.5e-5) -> list[tuple[float, float]]:
+    """Remove duplicate and spike artefacts from a GPS track.
+
+    Some route planners (e.g. MySchweizMobil) insert tiny "marker" detours
+    that look like:  A → B → B → A → next, with B less than ~1 m from A.
+    When the track is later buffered to a tube these spurs become visible
+    micro-spikes ("ausbrechende Formen") on the printed track.
+
+    Two-pass cleanup:
+      1. collapse consecutive duplicates within `dup_tol_deg` of each other;
+      2. drop any middle point whose neighbours coincide within tolerance —
+         i.e. a back-and-forth spike around a single location.
+    Final dedup pass catches duplicates produced by step 2.
+
+    `dup_tol_deg` ≈ 1.5e-5° ≈ 1.7 m in latitude.  Real out-and-back
+    sections in a route are at least an order of magnitude longer than
+    this and are therefore preserved.
+    """
+    if len(points) < 3:
+        return points
+
+    def close(a, b):
+        return abs(a[0] - b[0]) < dup_tol_deg and abs(a[1] - b[1]) < dup_tol_deg
+
+    # Pass 1: consecutive dedup
+    deduped = [points[0]]
+    for pt in points[1:]:
+        if not close(pt, deduped[-1]):
+            deduped.append(pt)
+
+    # Pass 2: drop "spike" middles where the neighbours collapse onto each other
+    pruned = [deduped[0]]
+    for i in range(1, len(deduped) - 1):
+        before = deduped[i - 1]
+        after = deduped[i + 1]
+        if close(before, after):
+            continue   # spike — middle point is an artefact
+        pruned.append(deduped[i])
+    pruned.append(deduped[-1])
+
+    # Pass 3: dedup again (pass 2 may have left two identical neighbours)
+    final = [pruned[0]]
+    for pt in pruned[1:]:
+        if not close(pt, final[-1]):
+            final.append(pt)
+    return final
 
 
 def _parse_igc(path: Path) -> list[tuple[float, float]]:

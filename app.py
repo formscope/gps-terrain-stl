@@ -74,6 +74,7 @@ def generate():
     min_water_area = float(request.form.get("min_water_area", 8_000_000))
     rivers = request.form.get("rivers") == "on"
     river_width = float(request.form.get("river_width", 0.9))
+    max_relief = float(request.form.get("max_relief", 5.0))
     no_water = request.form.get("no_water") == "on"
 
     # Save uploaded file to temp dir
@@ -177,6 +178,7 @@ def generate():
                 rect_height_mm=tile["rect_height_mm"],
                 rotation_rad=rotation_rad,
                 cut_edges=tile["cut_edges"] if tile["cut_edges"] else None,
+                max_relief_mm=max_relief,
             )
 
             tile_base = os.path.splitext(tile_output)[0]

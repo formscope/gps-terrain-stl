@@ -134,6 +134,7 @@ def build_and_export(
     rect_height_mm: float | None = None,
     rotation_rad: float = 0.0,
     cut_edges: set | None = None,
+    max_relief_mm: float = 5.0,
 ) -> None:
     """
     Build a solid terrain STL plus a track-tube body.
@@ -238,11 +239,26 @@ def build_and_export(
             # Without scipy, fall back to using all candidates.
             Z_sea = Z_sea_candidate
     elev_min = np.nanmin(Z_elev)
+    elev_max = np.nanmax(Z_elev)
     scale_z = scale_xy * exaggeration
+
+    # Cap the natural relief at max_relief_mm so the printed plate stays at a
+    # reasonable thickness regardless of disc aspect ratio.  For long-thin
+    # rectangles `scale_xy` is dominated by the short side, which otherwise
+    # blows up `scale_z * (elev_max-elev_min)` to far more than the plate
+    # itself.  The cap only kicks in if the natural relief would exceed the
+    # budget — small reliefs stay untouched.
+    relief_range_m = float(elev_max - elev_min)
+    if relief_range_m > 1.0:
+        natural_relief_mm = relief_range_m * scale_z
+        if natural_relief_mm > max_relief_mm:
+            scale_z = max_relief_mm / relief_range_m
 
     Zm = np.where(inside,
                   (Z_elev - elev_min) * scale_z + base_height_mm,
                   np.nan)
+    # Cached plate-top height (used for uniform-rim side walls below).
+    plate_top_mm = base_height_mm + relief_range_m * scale_z
 
     # ------------------------------------------------------------------
     # 2b. Pre-compute track in model space and carve groove into Zm
@@ -576,48 +592,15 @@ def build_and_export(
     # ------------------------------------------------------------------
     # ring_x, ring_y, N_ring already set by _generate_shape_ring()
 
-    # Interpolate elevation at ring vertices
-    _u_ring = ring_x / scale_xy
-    _v_ring = ring_y / scale_xy
-    ring_E = ce + _u_ring * rot_cos - _v_ring * rot_sin
-    ring_N = cn + _u_ring * rot_sin + _v_ring * rot_cos
-    ring_elev = interp(np.stack([ring_N, ring_E], axis=1))
-    ring_elev = np.where(np.isnan(ring_elev), elev_min, ring_elev)
-    ring_z = (ring_elev - elev_min) * scale_z + base_height_mm
+    # Disc rim is rendered as a uniform-height frame at plate_top_mm so the
+    # side walls form a clean rectangular box (or circle / hexagon) and the
+    # corners are sharp.  The terrain inside is still the actual relief.
+    ring_z = np.full(N_ring, plate_top_mm, dtype=float)
 
-    # Apply groove carving to ring vertices near the track
-    if tx is not None and basis_level is not None:
-        groove_hw2 = (track_width_mm / 2.0 + track_tolerance_mm) ** 2
-        tx_d, ty_d = _densify_track(tx, ty, pixel_size_mm * 0.5)
-        for ri in range(N_ring):
-            rx, ry = float(ring_x[ri]), float(ring_y[ri])
-            min_d2 = np.inf
-            for k in range(len(tx_d) - 1):
-                ax, ay = float(tx_d[k]), float(ty_d[k])
-                bx, by = float(tx_d[k + 1]), float(ty_d[k + 1])
-                dx, dy = bx - ax, by - ay
-                seg2 = dx * dx + dy * dy
-                if seg2 < 1e-12:
-                    d2 = (rx - ax) ** 2 + (ry - ay) ** 2
-                else:
-                    t = max(0.0, min(1.0, ((rx - ax) * dx + (ry - ay) * dy) / seg2))
-                    d2 = (rx - (ax + t * dx)) ** 2 + (ry - (ay + t * dy)) ** 2
-                if d2 < min_d2:
-                    min_d2 = d2
-            if min_d2 < groove_hw2 and ring_z[ri] > basis_level:
-                ring_z[ri] = basis_level
-
-    # Also carve ring for water polygons
-    if water_parts_ms:
-        try:
-            import shapely as shp
-            for part, _z_top, z_bot in water_parts_ms:
-                carved = part.buffer(track_tolerance_mm)
-                ring_inside_water = shp.contains_xy(carved, ring_x, ring_y)
-                ring_z = np.where(ring_inside_water & (ring_z > z_bot), z_bot, ring_z)
-        except Exception:
-            pass
-
+    # NOTE: with the uniform plate_top rim, the ring is no longer carved by
+    # the track groove or water polygons.  The plate has a clean rectangular
+    # (or circular / hexagonal) rim everywhere; track and water remain
+    # visible as recessed features on the top surface.
     ring_verts_top = list(zip(ring_x.tolist(), ring_y.tolist(), ring_z.tolist()))
 
     # ------------------------------------------------------------------

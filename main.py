@@ -43,6 +43,9 @@ def main():
                              "(used when --padding is not given)")
     parser.add_argument("--exaggeration", type=float, default=1.0,
                         help="Vertical exaggeration factor")
+    parser.add_argument("--max-relief", type=float, default=5.0,
+                        help="Cap on the terrain relief in mm above the base "
+                             "(default 5 mm). Prevents extremely thick plates.")
     parser.add_argument("--resolution", type=int, default=512,
                         help="Raster/grid resolution (pixels per side, max 2000)")
     parser.add_argument("--base-height", type=float, default=3.0,
@@ -194,6 +197,7 @@ def main():
             rect_height_mm=tile["rect_height_mm"],
             rotation_rad=rotation_rad,
             cut_edges=tile["cut_edges"] if tile["cut_edges"] else None,
+            max_relief_mm=args.max_relief,
         )
     print("Done.")
 

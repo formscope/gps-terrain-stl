@@ -699,9 +699,13 @@ def build_and_export(
                     if not isinstance(geom, _SPoly) or geom.is_empty:
                         continue
                     try:
-                        tri_coll = shp.delaunay_triangles(geom, only_edges=False)
-                        sub_tris = [g for g in tri_coll.geoms
-                                    if geom.contains(g.representative_point())]
+                        if hasattr(shp, "constrained_delaunay_triangles"):
+                            tri_coll = shp.constrained_delaunay_triangles(geom)
+                            sub_tris = list(tri_coll.geoms)
+                        else:
+                            tri_coll = shp.delaunay_triangles(geom, only_edges=False)
+                            sub_tris = [g for g in tri_coll.geoms
+                                        if geom.contains(g.representative_point())]
                     except Exception:
                         sub_tris = []
                     for tri in sub_tris:
@@ -738,9 +742,13 @@ def build_and_export(
 
             # --- Floor: flat plate at basis_level (normal up, into cavity) ---
             try:
-                tri_coll = shp.delaunay_triangles(poly, only_edges=False)
-                floor_tris = [g for g in tri_coll.geoms
-                              if poly.contains(g.representative_point())]
+                if hasattr(shp, "constrained_delaunay_triangles"):
+                    tri_coll = shp.constrained_delaunay_triangles(poly)
+                    floor_tris = list(tri_coll.geoms)
+                else:
+                    tri_coll = shp.delaunay_triangles(poly, only_edges=False)
+                    floor_tris = [g for g in tri_coll.geoms
+                                  if poly.contains(g.representative_point())]
             except Exception:
                 floor_tris = []
             for tri in floor_tris:
@@ -1177,12 +1185,19 @@ def _build_track_solid(tx, ty, width_mm, raise_mm, basis_level, terrain_top_z,
     for poly in polys:
         poly = orient(poly, sign=1.0)   # exterior CCW, holes CW
 
-        # ---- top + bottom faces via Delaunay triangulation -----------
+        # ---- top + bottom faces via constrained Delaunay -------------
+        # Constrained Delaunay respects the polygon boundary, so no triangles
+        # ever span across concavities (which is what produced visible
+        # "Ausbrüche" on long, curvy track polygons).
         try:
             import shapely as shp
-            tri_collection = shp.delaunay_triangles(poly, only_edges=False)
-            inside_tris = [g for g in tri_collection.geoms
-                           if poly.contains(g.representative_point())]
+            if hasattr(shp, "constrained_delaunay_triangles"):
+                tri_collection = shp.constrained_delaunay_triangles(poly)
+                inside_tris = list(tri_collection.geoms)
+            else:
+                tri_collection = shp.delaunay_triangles(poly, only_edges=False)
+                inside_tris = [g for g in tri_collection.geoms
+                               if poly.contains(g.representative_point())]
         except Exception:
             inside_tris = []
 

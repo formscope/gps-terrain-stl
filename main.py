@@ -17,7 +17,9 @@ from geometry import (
     compute_geometry,
     compute_rect_geometry,
     compute_rect_tiles,
-    wgs84_to_lv95,
+    init_projection_from_points,
+    is_swiss_area,
+    wgs84_to_local,
 )
 from elevation import fetch_elevation
 from mesh import build_and_export
@@ -94,6 +96,11 @@ def main():
     points = load_track(args.input)
     print(f"  {len(points)} track points")
 
+    # --- Local projection (LV95 inside Switzerland, transverse-Mercator else) ---
+    centre_lon, centre_lat = init_projection_from_points(points)
+    print(f"  Centroid (WGS84):  {centre_lat:.4f}°N, {centre_lon:.4f}°E  "
+          f"({'Switzerland — LV95' if is_swiss_area() else 'global — local TM'})")
+
     # --- Geometry ---
     print("Computing geometry…")
     if args.shape == "rectangle":
@@ -120,10 +127,10 @@ def main():
     print(f"  Grid: {elevation.shape[1]}×{elevation.shape[0]} px,  "
           f"elevation {elev_min:.0f}–{elev_max:.0f} m")
 
-    # --- Track in LV95 ---
+    # --- Track in local CRS ---
     lats = [p[0] for p in points]
     lons = [p[1] for p in points]
-    east, north = wgs84_to_lv95(lats, lons)
+    east, north = wgs84_to_local(lats, lons)
     track_lv95 = list(zip(east.tolist(), north.tolist()))
     # Altitude is present for IGC files (3-tuple), absent for GPX (2-tuple)
     track_alts = [p[2] for p in points] if len(points[0]) > 2 else None

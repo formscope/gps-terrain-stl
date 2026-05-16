@@ -16,7 +16,8 @@ from geometry import (
     compute_geometry,
     compute_rect_geometry,
     compute_rect_tiles,
-    wgs84_to_lv95,
+    init_projection_from_points,
+    wgs84_to_local,
 )
 from elevation import fetch_elevation
 from mesh import build_and_export
@@ -87,6 +88,10 @@ def generate():
         # Load track
         points = load_track(input_path)
 
+        # Configure the local projection from the track centroid — uses LV95
+        # in Switzerland, a track-centred Transverse Mercator elsewhere.
+        init_projection_from_points(points)
+
         # Geometry — for rectangle we orient the track's long axis along the
         # rectangle's long side and force a 20 mm edge margin.
         if shape == "rectangle":
@@ -104,10 +109,10 @@ def generate():
         # Elevation
         elevation, grid_info = fetch_elevation(center_lv95, radius_m, resolution)
 
-        # Track in LV95
+        # Track in local CRS
         lats = [p[0] for p in points]
         lons = [p[1] for p in points]
-        east, north = wgs84_to_lv95(lats, lons)
+        east, north = wgs84_to_local(lats, lons)
         track_lv95 = list(zip(east.tolist(), north.tolist()))
         track_alts = [p[2] for p in points] if len(points[0]) > 2 else None
 

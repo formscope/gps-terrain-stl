@@ -299,7 +299,7 @@ def build_and_export(
     # ------------------------------------------------------------------
     water_parts_ms = []   # (shapely Polygon in model space, z_top, z_bot)
 
-    if water_polys_lv95:
+    if water_polys_lv95 or rivers_lv95:
         try:
             import shapely as shp
             from shapely.geometry import Point as SPoint, Polygon as SPolygon, \

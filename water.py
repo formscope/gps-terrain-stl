@@ -4,7 +4,8 @@ import hashlib
 import json
 import os
 import requests
-from pyproj import Transformer
+
+from geometry import wgs84_to_local, local_to_wgs84, is_swiss_area
 
 try:
     from shapely.geometry import LineString, Polygon
@@ -96,10 +97,9 @@ def fetch_water_bodies(
         print("  shapely not installed — skipping water bodies.")
         return [], []
 
-    # LV95 centre + radius → WGS84 bounding box
-    to_wgs84 = Transformer.from_crs("EPSG:2056", "EPSG:4326", always_xy=True)
+    # Local centre + radius → WGS84 bounding box
     ce, cn = center_lv95
-    lons, lats = to_wgs84.transform(
+    lons, lats = local_to_wgs84(
         [ce - radius_m, ce + radius_m],
         [cn - radius_m, cn + radius_m],
     )
@@ -136,12 +136,10 @@ def fetch_water_bodies(
         print("  Warning: all Overpass mirrors failed — skipping water bodies.")
         return [], []
 
-    to_lv95 = Transformer.from_crs("EPSG:4326", "EPSG:2056", always_xy=True)
-
     def nodes_to_lv95(nodes):
         lons_ = [n["lon"] for n in nodes]
         lats_ = [n["lat"] for n in nodes]
-        e, n = to_lv95.transform(lons_, lats_)
+        e, n = wgs84_to_local(lats_, lons_)
         return list(zip(e, n))
 
     all_polys = []
@@ -155,8 +153,13 @@ def fetch_water_bodies(
         if is_river_way:
             # Keep main rivers (by name) as LineStrings — rendered as a
             # fixed-width ribbon by mesh.py so they survive on small prints.
+            # In Switzerland we apply the curated whitelist; outside CH we
+            # accept every named river (OSM tags rivers worldwide).
             name = (tags.get("name") or "").strip().lower()
-            if name in MAIN_RIVER_NAMES:
+            keep = name and (
+                name in MAIN_RIVER_NAMES if is_swiss_area() else True
+            )
+            if keep:
                 geom = elem.get("geometry", [])
                 if len(geom) >= 2:
                     try:

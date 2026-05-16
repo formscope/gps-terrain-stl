@@ -1,17 +1,107 @@
-"""Coordinate transforms and track geometry calculations."""
+"""Coordinate transforms and track geometry calculations.
+
+The "local" projection used by every other module is configured by
+set_projection().  Tracks inside Switzerland use EPSG:2056 (LV95) so we
+can keep using SwissALTI3D; tracks anywhere else use a track-centred
+Transverse Mercator (metres, no scale distortion at the centre), which
+keeps the rest of the pipeline unchanged.
+"""
 
 import numpy as np
 import shapely
 from shapely.geometry import MultiPoint
-from pyproj import Transformer
+from pyproj import CRS, Transformer
 
-_to_lv95 = Transformer.from_crs("EPSG:4326", "EPSG:2056", always_xy=True)
-_to_wgs84 = Transformer.from_crs("EPSG:2056", "EPSG:4326", always_xy=True)
+# Approximate WGS84 bounding box of Switzerland (slightly padded). Tracks
+# whose centroid falls inside this box use LV95; everywhere else falls back
+# to a track-centred Transverse Mercator.
+_CH_BOUNDS = (5.9, 45.7, 10.6, 47.9)   # (lon_min, lat_min, lon_max, lat_max)
 
 
+class _ProjectorState:
+    """Holds the currently active local projection.  Configured per request."""
+    def __init__(self):
+        self.to_local: Transformer | None = None
+        self.to_wgs84: Transformer | None = None
+        self.crs: CRS | None = None
+        self.is_swiss: bool = False
+        self.centre_lon: float = 8.0
+        self.centre_lat: float = 46.8
+
+
+_state = _ProjectorState()
+
+
+def set_projection(centre_lon: float, centre_lat: float) -> None:
+    """Configure the local projection used by every other module.
+
+    Must be called before compute_geometry / fetch_elevation / etc. The
+    chosen CRS is EPSG:2056 (LV95) for tracks inside Switzerland and a
+    track-centred Transverse Mercator otherwise.
+    """
+    lon_min, lat_min, lon_max, lat_max = _CH_BOUNDS
+    is_swiss = (lon_min < centre_lon < lon_max) and (lat_min < centre_lat < lat_max)
+    if is_swiss:
+        crs = CRS.from_epsg(2056)
+    else:
+        crs = CRS.from_proj4(
+            f"+proj=tmerc +lat_0={centre_lat} +lon_0={centre_lon} "
+            "+k=1 +x_0=0 +y_0=0 +ellps=WGS84 +units=m +no_defs"
+        )
+    _state.to_local = Transformer.from_crs("EPSG:4326", crs, always_xy=True)
+    _state.to_wgs84 = Transformer.from_crs(crs, "EPSG:4326", always_xy=True)
+    _state.crs = crs
+    _state.is_swiss = is_swiss
+    _state.centre_lon = centre_lon
+    _state.centre_lat = centre_lat
+
+
+def _ensure_default_projection():
+    if _state.to_local is None:
+        set_projection(8.0, 46.8)
+
+
+def wgs84_to_local(lats, lons) -> tuple[np.ndarray, np.ndarray]:
+    """Convert WGS84 (lat, lon) arrays to local projected (E, N) in metres."""
+    _ensure_default_projection()
+    return _state.to_local.transform(np.asarray(lons), np.asarray(lats))
+
+
+def local_to_wgs84(east, north) -> tuple[np.ndarray, np.ndarray]:
+    """Inverse of wgs84_to_local — returns (lon, lat)."""
+    _ensure_default_projection()
+    return _state.to_wgs84.transform(np.asarray(east), np.asarray(north))
+
+
+def is_swiss_area() -> bool:
+    """True iff the currently configured projection is LV95 (Switzerland)."""
+    _ensure_default_projection()
+    return _state.is_swiss
+
+
+def local_crs() -> CRS:
+    """Return the currently active local CRS (a pyproj CRS object)."""
+    _ensure_default_projection()
+    return _state.crs
+
+
+# Backward-compat alias — the rest of the codebase will be migrated.
 def wgs84_to_lv95(lats, lons) -> tuple[np.ndarray, np.ndarray]:
-    """Convert WGS84 (lat, lon) arrays to LV95 (E, N) in meters."""
-    return _to_lv95.transform(np.asarray(lons), np.asarray(lats))
+    """Deprecated alias for wgs84_to_local()."""
+    return wgs84_to_local(lats, lons)
+
+
+def init_projection_from_points(points) -> tuple[float, float]:
+    """Configure the local projection from the centroid of the given track.
+
+    Returns the centroid (lon, lat) for callers that want to log it.
+    """
+    lats = [p[0] for p in points]
+    lons = [p[1] for p in points]
+    centre_lon = float(np.mean(lons))
+    centre_lat = float(np.mean(lats))
+    set_projection(centre_lon, centre_lat)
+    return centre_lon, centre_lat
 
 
 def compute_geometry(
@@ -31,7 +121,7 @@ def compute_geometry(
     lats = np.array([p[0] for p in points])
     lons = np.array([p[1] for p in points])
 
-    east, north = wgs84_to_lv95(lats, lons)
+    east, north = wgs84_to_local(lats, lons)
 
     # Minimum bounding circle of the track: smallest circle enclosing all
     # points.  Using this instead of the centroid + max-distance gives an
@@ -75,7 +165,7 @@ def compute_rect_geometry(
     """
     lats = np.array([p[0] for p in points])
     lons = np.array([p[1] for p in points])
-    east, north = wgs84_to_lv95(lats, lons)
+    east, north = wgs84_to_local(lats, lons)
 
     # Compute principal axes via PCA on (E, N).
     east_c = east - east.mean()
@@ -128,15 +218,15 @@ def compute_rect_geometry(
     radius_mm_grid = max(rect_width_mm, rect_height_mm) / 2.0
     radius_m = radius_mm_grid / scale
 
-    # Sanity cap: LV95 is only valid inside Switzerland.  If the plate area
-    # would need elevation data more than ~250 km from the centre, the track
-    # is almost certainly outside the supported region (or pathological) —
-    # raise a clear error rather than asking Amazon for an ocean tile.
-    if radius_m > 250_000:
+    # Sanity cap: a transverse-Mercator projection stays well-behaved up to
+    # roughly ±500 km from its centre.  If the plate would need elevation
+    # data over a larger area, something is wrong with the input (single
+    # point, garbage coordinates, …).
+    if radius_m > 500_000:
         raise ValueError(
             f"Plate would need elevation data over a {2*radius_m/1000:.0f} km area, "
-            "which is far outside the SwissALTI3D / LV95 coverage. "
-            "Check that the GPX file is in Switzerland and not a single point."
+            "which is far beyond the supported projection range. "
+            "Check that the GPX file has reasonable coordinates and more than one point."
         )
 
     return (ce, cn), float(radius_m), float(rotation_rad)

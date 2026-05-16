@@ -1,7 +1,9 @@
 """
-Fetch elevation data for a given LV95 bounding area.
+Fetch elevation data for a given local-projected bounding area.
 
 Primary:  Swisstopo SwissALTI3D via STAC API (Switzerland only, 2 m resolution).
+          Used automatically when the current geometry projection is LV95
+          (i.e. the track's centroid lies inside Switzerland).
 Fallback: Copernicus DEM GLO-30 from AWS S3 (global, 30 m, free, cached locally).
 """
 
@@ -16,6 +18,8 @@ from rasterio.merge import merge
 from rasterio.transform import from_bounds
 from rasterio.warp import reproject as warp_reproject, Resampling
 from pyproj import Transformer
+
+from geometry import is_swiss_area, local_to_wgs84, local_crs
 
 MAX_PIXELS = 2000
 
@@ -49,12 +53,15 @@ def fetch_elevation(
         grid_info: {"x_coords": (W,), "y_coords": (H,)} in LV95 metres
     """
     resolution = min(resolution, MAX_PIXELS)
-    try:
-        return _fetch_swissalti3d_stac(center_lv95, radius_m, resolution)
-    except Exception as exc:
-        print(f"  SwissALTI3D unavailable ({type(exc).__name__}: {exc}), "
-              f"falling back to Copernicus DEM GLO-30…")
-        return _fetch_copernicus(center_lv95, radius_m, resolution)
+    # SwissALTI3D only covers Switzerland and requires LV95 coordinates.
+    # For tracks anywhere else, go straight to the global Copernicus dataset.
+    if is_swiss_area():
+        try:
+            return _fetch_swissalti3d_stac(center_lv95, radius_m, resolution)
+        except Exception as exc:
+            print(f"  SwissALTI3D unavailable ({type(exc).__name__}: {exc}), "
+                  f"falling back to Copernicus DEM GLO-30…")
+    return _fetch_copernicus(center_lv95, radius_m, resolution)
 
 
 # ---------------------------------------------------------------------------
@@ -188,11 +195,10 @@ def _tile_url(lat: int, lon: int) -> tuple[str, str]:
 
 
 def _fetch_copernicus(center_lv95, radius_m, resolution):
-    to_wgs84 = Transformer.from_crs("EPSG:2056", "EPSG:4326", always_xy=True)
     ce, cn = center_lv95
 
-    # Bounding box in WGS84
-    lons, lats = to_wgs84.transform(
+    # Local centre + radius → WGS84 bounding box
+    lons, lats = local_to_wgs84(
         [ce - radius_m, ce + radius_m],
         [cn - radius_m, cn + radius_m],
     )
@@ -244,8 +250,9 @@ def _fetch_copernicus(center_lv95, radius_m, resolution):
         raw[raw == raw_nodata] = np.nan
     raw[raw < -500] = np.nan    # catch any remaining void flags
 
-    # Reproject raw WGS84 raster → LV95, cropped to our bbox
-    dst_crs = CRS.from_epsg(2056)
+    # Reproject raw WGS84 raster → local CRS, cropped to our bbox.
+    # rasterio.warp wants a rasterio CRS; pyproj CRS works via WKT.
+    dst_crs = CRS.from_wkt(local_crs().to_wkt())
     bbox_lv95 = (ce - radius_m, cn - radius_m, ce + radius_m, cn + radius_m)
     dst_transform = from_bounds(*bbox_lv95, resolution, resolution)
 

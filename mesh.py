@@ -203,17 +203,40 @@ def build_and_export(
     query_pts = np.stack([N_grid[inside], E_grid[inside]], axis=1)
     elev_vals = interp(query_pts)
 
-    # Pixels with NaN elevation are treated as sea: the global Copernicus DEM
-    # uses NODATA over the ocean.  We mark them, then clamp them to 0 m so
-    # they show up as a flat sea-level plate in the mesh.
-    sea_pixel_mask_1d = np.isnan(elev_vals)
-    if sea_pixel_mask_1d.any():
-        elev_vals[sea_pixel_mask_1d] = 0.0
+    # Sea detection.  Copernicus DEM uses two conventions:
+    #   - NODATA / NaN over open ocean (e.g. Mediterranean tiles)
+    #   - exactly 0 m over the ocean (e.g. the Atlantic near Boston)
+    # We treat *both* as sea candidates and then filter the resulting mask by
+    # connected-component size so that tiny coincidentally low-elevation
+    # patches (small ponds, voids) are not misclassified.
+    SEA_ELEV_MAX_M = 0.5
+    sea_nan_1d = np.isnan(elev_vals)
+    sea_low_1d = (~sea_nan_1d) & (elev_vals <= SEA_ELEV_MAX_M)
+    sea_candidate_1d = sea_nan_1d | sea_low_1d
+    if sea_nan_1d.any():
+        elev_vals[sea_nan_1d] = 0.0
 
     Z_elev = np.full((N, N), np.nan)
     Z_elev[inside] = elev_vals
+    Z_sea_candidate = np.zeros((N, N), dtype=bool)
+    Z_sea_candidate[inside] = sea_candidate_1d
+
     Z_sea = np.zeros((N, N), dtype=bool)
-    Z_sea[inside] = sea_pixel_mask_1d
+    if Z_sea_candidate.any():
+        try:
+            from scipy.ndimage import label as _label
+            labels_arr, n_labels = _label(Z_sea_candidate)
+            # Keep only components that are >= 0.05 % of the total grid (with
+            # an absolute floor of 50 pixels) — large enough to plausibly be
+            # an ocean / large bay, not an isolated low patch.
+            min_pixels = max(50, (N * N) // 2000)
+            for lid in range(1, n_labels + 1):
+                comp = (labels_arr == lid)
+                if comp.sum() >= min_pixels:
+                    Z_sea |= comp
+        except Exception:
+            # Without scipy, fall back to using all candidates.
+            Z_sea = Z_sea_candidate
     elev_min = np.nanmin(Z_elev)
     scale_z = scale_xy * exaggeration
 

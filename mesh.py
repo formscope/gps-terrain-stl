@@ -250,19 +250,18 @@ def build_and_export(
     else:
         elev_min = np.nanmin(Z_elev)
         elev_max = np.nanmax(Z_elev)
-    scale_z = scale_xy * exaggeration
-
-    # Cap the natural relief at max_relief_mm so the printed plate stays at a
-    # reasonable thickness regardless of disc aspect ratio.  For long-thin
-    # rectangles `scale_xy` is dominated by the short side, which otherwise
-    # blows up `scale_z * (elev_max-elev_min)` to far more than the plate
-    # itself.  The cap only kicks in if the natural relief would exceed the
-    # budget — small reliefs stay untouched.
+    # Base vertical scale: cap the natural relief at max_relief_mm so the
+    # printed plate stays at a reasonable thickness regardless of disc aspect
+    # ratio (long-thin rectangles otherwise blow `scale_xy` up via the short
+    # side).  `exaggeration` is applied AFTER the cap, so it always has a
+    # visible effect — e.g. exaggeration=2 gives twice the capped relief.
     relief_range_m = float(elev_max - elev_min)
+    base_scale_z = scale_xy
     if relief_range_m > 1.0:
-        natural_relief_mm = relief_range_m * scale_z
+        natural_relief_mm = relief_range_m * base_scale_z
         if natural_relief_mm > max_relief_mm:
-            scale_z = max_relief_mm / relief_range_m
+            base_scale_z = max_relief_mm / relief_range_m
+    scale_z = base_scale_z * exaggeration
 
     Zm = np.where(inside,
                   (Z_elev - elev_min) * scale_z + base_height_mm,

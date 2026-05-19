@@ -107,8 +107,15 @@ def generate():
             center_lv95, radius_m = compute_geometry(points, padding=padding)
             rotation_rad = 0.0
 
-        # Elevation
-        elevation, grid_info = fetch_elevation(center_lv95, radius_m, resolution)
+        # Elevation.  For a rotated rectangle the square model grid maps to a
+        # rotated square in the local CRS, whose axis-aligned bounding box is
+        # larger than `radius_m`.  Fetch the enclosing box so the rotated
+        # corners are covered and don't end up as NaN ("cut off") pixels.
+        import math as _math
+        fetch_radius = radius_m * (
+            abs(_math.cos(rotation_rad)) + abs(_math.sin(rotation_rad))
+        )
+        elevation, grid_info = fetch_elevation(center_lv95, fetch_radius, resolution)
 
         # Track in local CRS
         lats = [p[0] for p in points]
@@ -122,7 +129,7 @@ def generate():
             water_polys, river_lines = [], []
         else:
             water_polys, river_lines = fetch_water_bodies(
-                center_lv95, radius_m,
+                center_lv95, fetch_radius,
                 min_area_m2=min_water_area,
                 include_rivers=rivers,
             )

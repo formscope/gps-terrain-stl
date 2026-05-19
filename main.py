@@ -123,8 +123,14 @@ def main():
     print(f"  Radius (padded): {radius_m:.0f} m  ({radius_m/1000:.2f} km)")
 
     # --- Elevation ---
+    # For a rotated rectangle the square model grid maps to a rotated square
+    # in the local CRS; fetch its axis-aligned bounding box so the diagonal
+    # corners are covered instead of becoming NaN ("cut off") pixels.
+    fetch_radius = radius_m * (
+        abs(np.cos(rotation_rad)) + abs(np.sin(rotation_rad))
+    )
     print("Fetching SwissALTI3D elevation data…")
-    elevation, grid_info = fetch_elevation(center_lv95, radius_m, args.resolution)
+    elevation, grid_info = fetch_elevation(center_lv95, fetch_radius, args.resolution)
     elev_min = float(np.nanmin(elevation))
     elev_max = float(np.nanmax(elevation))
     print(f"  Grid: {elevation.shape[1]}×{elevation.shape[0]} px,  "
@@ -144,7 +150,7 @@ def main():
     else:
         print("Fetching water bodies from OpenStreetMap…")
         water_polys, river_lines = fetch_water_bodies(
-            center_lv95, radius_m,
+            center_lv95, fetch_radius,
             min_area_m2=args.min_water_area,
             include_rivers=args.rivers,
         )

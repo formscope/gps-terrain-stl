@@ -257,8 +257,6 @@ def build_and_export(
     Zm = np.where(inside,
                   (Z_elev - elev_min) * scale_z + base_height_mm,
                   np.nan)
-    # Cached plate-top height (used for uniform-rim side walls below).
-    plate_top_mm = base_height_mm + relief_range_m * scale_z
 
     # ------------------------------------------------------------------
     # 2b. Pre-compute track in model space and carve groove into Zm
@@ -592,15 +590,21 @@ def build_and_export(
     # ------------------------------------------------------------------
     # ring_x, ring_y, N_ring already set by _generate_shape_ring()
 
-    # Disc rim is rendered as a uniform-height frame at plate_top_mm so the
-    # side walls form a clean rectangular box (or circle / hexagon) and the
-    # corners are sharp.  The terrain inside is still the actual relief.
-    ring_z = np.full(N_ring, plate_top_mm, dtype=float)
+    # The rim follows the terrain relief — there is no raised frame.  The
+    # ring-vertex height is the interpolated terrain elevation, so the plate
+    # edge and the corners match the topography exactly.
+    _u_ring = ring_x / scale_xy
+    _v_ring = ring_y / scale_xy
+    ring_E = ce + _u_ring * rot_cos - _v_ring * rot_sin
+    ring_N = cn + _u_ring * rot_sin + _v_ring * rot_cos
+    ring_elev = interp(np.stack([ring_N, ring_E], axis=1))
+    ring_elev = np.where(np.isnan(ring_elev), elev_min, ring_elev)
+    ring_z = (ring_elev - elev_min) * scale_z + base_height_mm
 
-    # NOTE: with the uniform plate_top rim, the ring is no longer carved by
-    # the track groove or water polygons.  The plate has a clean rectangular
-    # (or circular / hexagonal) rim everywhere; track and water remain
-    # visible as recessed features on the top surface.
+    # The rim is NOT carved down for the track groove or water bodies — that
+    # would create artificial notches / sunken corners.  Track and water stay
+    # visible as recessed features on the inner surface only; the plate edge
+    # itself simply follows the terrain.
     ring_verts_top = list(zip(ring_x.tolist(), ring_y.tolist(), ring_z.tolist()))
 
     # ------------------------------------------------------------------

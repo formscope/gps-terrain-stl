@@ -151,6 +151,19 @@ def generate():
                 "cut_edges": set(),
             }]
 
+        # Global elevation reference shared by every tile so the cut edges
+        # have identical z-mapping (no seam offset).  Sea pixels are NaN in
+        # the raster and clamp to 0 m in mesh.py — mirror that here.
+        if len(tiles) > 1:
+            g_min = float(np.nanmin(elevation))
+            g_max = float(np.nanmax(elevation))
+            if np.isnan(elevation).any():
+                g_min = min(g_min, 0.0)
+                g_max = max(g_max, 0.0)
+            tile_elev_min, tile_elev_max = g_min, g_max
+        else:
+            tile_elev_min, tile_elev_max = None, None
+
         stl_base = os.path.splitext(input_path)[0]
         part_suffixes = ["_terrain", "_track", "_water"]
         stl_files: list[tuple[str, str]] = []  # (disk path, arcname)
@@ -186,6 +199,8 @@ def generate():
                 rotation_rad=rotation_rad,
                 cut_edges=tile["cut_edges"] if tile["cut_edges"] else None,
                 max_relief_mm=max_relief,
+                elev_min_override=tile_elev_min,
+                elev_max_override=tile_elev_max,
             )
 
             tile_base = os.path.splitext(tile_output)[0]

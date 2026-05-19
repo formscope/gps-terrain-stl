@@ -173,6 +173,17 @@ def main():
             "cut_edges": set(),
         }]
 
+    # Global elevation reference shared by every tile so the cut edges have
+    # identical z-mapping (no seam offset).
+    if len(tiles) > 1:
+        tile_elev_min = float(np.nanmin(elevation))
+        tile_elev_max = float(np.nanmax(elevation))
+        if np.isnan(elevation).any():
+            tile_elev_min = min(tile_elev_min, 0.0)
+            tile_elev_max = max(tile_elev_max, 0.0)
+    else:
+        tile_elev_min, tile_elev_max = None, None
+
     base, ext = os.path.splitext(args.output)
     for tile in tiles:
         if tile["total"] > 1:
@@ -204,6 +215,8 @@ def main():
             rotation_rad=rotation_rad,
             cut_edges=tile["cut_edges"] if tile["cut_edges"] else None,
             max_relief_mm=args.max_relief,
+            elev_min_override=tile_elev_min,
+            elev_max_override=tile_elev_max,
         )
     print("Done.")
 

@@ -135,6 +135,8 @@ def build_and_export(
     rotation_rad: float = 0.0,
     cut_edges: set | None = None,
     max_relief_mm: float = 5.0,
+    elev_min_override: float | None = None,
+    elev_max_override: float | None = None,
 ) -> None:
     """
     Build a solid terrain STL plus a track-tube body.
@@ -238,8 +240,16 @@ def build_and_export(
         except Exception:
             # Without scipy, fall back to using all candidates.
             Z_sea = Z_sea_candidate
-    elev_min = np.nanmin(Z_elev)
-    elev_max = np.nanmax(Z_elev)
+    # Use the supplied global elevation reference when tiling, so every tile
+    # maps elevation to the same model-space z and the cut edges line up
+    # without any vertical offset ("Versatz").  Falls back to this plate's
+    # own range for a single, non-tiled plate.
+    if elev_min_override is not None and elev_max_override is not None:
+        elev_min = float(elev_min_override)
+        elev_max = float(elev_max_override)
+    else:
+        elev_min = np.nanmin(Z_elev)
+        elev_max = np.nanmax(Z_elev)
     scale_z = scale_xy * exaggeration
 
     # Cap the natural relief at max_relief_mm so the printed plate stays at a

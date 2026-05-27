@@ -106,32 +106,12 @@ def fetch_water_bodies(
     south, north = min(lats), max(lats)
     west,  east  = min(lons), max(lons)
 
-    bb = f"({south},{west},{north},{east})"
-
-    # Lakes & reservoirs only as polygons — rivers are fetched as
-    # waterway=river LineStrings below so we can render them at a printable
-    # constant width regardless of the actual river width.
-    exclude = '["water"!="river"]["water"!="canal"]["water"!="stream"]'
-    if include_rivers:
-        river_lines = (
-            f'  way["waterway"="river"]["name"]{bb};\n'
-        )
-    else:
-        river_lines = ""
-
-    query = (
-        f"[out:json][timeout:60];\n"
-        f"(\n"
-        f'  way["natural"="water"]{exclude}{bb};\n'
-        f'  relation["natural"="water"]["type"="multipolygon"]{exclude}{bb};\n'
-        f'  way["landuse"="reservoir"]{bb};\n'
-        f'  relation["landuse"="reservoir"]["type"="multipolygon"]{bb};\n'
-        f"{river_lines}"
-        f");\n"
-        f"out geom;\n"
-    )
-
-    elements = _fetch_with_cache(query)
+    # For very large bboxes, `out geom;` silently drops the largest multipolygon
+    # relations (we observed Lago di Garda disappearing while smaller lakes in
+    # the same area came through).  Split the bbox into tiles of <=1.5° per
+    # side and union the per-tile responses.
+    elements = _fetch_in_tiles(south, west, north, east, include_rivers,
+                                max_tile_deg=1.5)
     if elements is None:
         print("  Warning: all Overpass mirrors failed — skipping water bodies.")
         return [], []
@@ -242,6 +222,65 @@ def fetch_water_bodies(
         print(f"  {len(river_lines_lv95)} main river segment(s) kept")
 
     return polys, river_lines_lv95
+
+
+def _build_query(south: float, west: float, north: float, east: float,
+                  include_rivers: bool) -> str:
+    bb = f"({south},{west},{north},{east})"
+    exclude = '["water"!="river"]["water"!="canal"]["water"!="stream"]'
+    river_lines = (
+        f'  way["waterway"="river"]["name"]{bb};\n'
+        if include_rivers else ""
+    )
+    return (
+        f"[out:json][timeout:180];\n"
+        f"(\n"
+        f'  way["natural"="water"]{exclude}{bb};\n'
+        f'  relation["natural"="water"]["type"="multipolygon"]{exclude}{bb};\n'
+        f'  way["landuse"="reservoir"]{bb};\n'
+        f'  relation["landuse"="reservoir"]["type"="multipolygon"]{bb};\n'
+        f"{river_lines}"
+        f");\n"
+        f"out geom;\n"
+    )
+
+
+def _fetch_in_tiles(south: float, west: float, north: float, east: float,
+                     include_rivers: bool, max_tile_deg: float = 1.5):
+    """Run the Overpass query in tiles of up to max_tile_deg per side and
+    merge the results.  Overpass quietly truncates the response on very
+    large `out geom;` queries (large multipolygon relations like Lago di
+    Garda go missing), so tiling keeps every response small enough to come
+    back complete."""
+    import math
+    lat_span = north - south
+    lon_span = east - west
+
+    # Single-query fast path for small bboxes.
+    if lat_span <= max_tile_deg and lon_span <= max_tile_deg:
+        return _fetch_with_cache(_build_query(south, west, north, east,
+                                              include_rivers))
+
+    n_lat = max(1, math.ceil(lat_span / max_tile_deg))
+    n_lon = max(1, math.ceil(lon_span / max_tile_deg))
+    print(f"  Splitting Overpass request into {n_lat}x{n_lon} tiles")
+
+    merged_by_key: dict = {}   # (type, id) -> element  (dedup across tiles)
+    for i in range(n_lat):
+        s = south + lat_span * i / n_lat
+        n = south + lat_span * (i + 1) / n_lat
+        for j in range(n_lon):
+            w = west + lon_span * j / n_lon
+            e = west + lon_span * (j + 1) / n_lon
+            tile_elems = _fetch_with_cache(_build_query(s, w, n, e,
+                                                         include_rivers))
+            if not tile_elems:
+                continue
+            for el in tile_elems:
+                key = (el.get("type"), el.get("id"))
+                if key not in merged_by_key:
+                    merged_by_key[key] = el
+    return list(merged_by_key.values())
 
 
 def _fetch_with_cache(query: str) -> list | None:

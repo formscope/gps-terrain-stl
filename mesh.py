@@ -476,10 +476,14 @@ def build_and_export(
                     if clipped.is_empty:
                         continue
 
-                # 1 mm² minimum: filters slivers produced by disc-clip or
-                # track subtraction, even when the parent lake passed the OSM filter.
+                # Drop slivers smaller than one grid pixel: anything that
+                # small won't render visibly anyway.  Scales with the model
+                # resolution so the user-specified min_water_area (m²) is
+                # the effective threshold for visibility.
+                min_part_area = pixel_size_mm * pixel_size_mm
                 parts = [g for g in (clipped.geoms if hasattr(clipped, 'geoms') else [clipped])
-                         if isinstance(g, SPolygon) and not g.is_empty and g.area >= 1.0]
+                         if isinstance(g, SPolygon) and not g.is_empty
+                         and g.area >= min_part_area]
 
                 for part in parts:
                     # Sample terrain elevation at centroid for plate height
@@ -579,9 +583,10 @@ def build_and_export(
                         clipped = clipped.difference(track_buf_ms)
                         if clipped.is_empty:
                             continue
+                    min_part_area = pixel_size_mm * pixel_size_mm
                     parts = [g for g in (clipped.geoms if hasattr(clipped, "geoms") else [clipped])
                              if isinstance(g, SPolygon) and not g.is_empty
-                             and g.area >= 1.0]
+                             and g.area >= min_part_area]
                     for part in parts:
                         carved = part.buffer(track_tolerance_mm)
                         water_mask = shp.contains_xy(

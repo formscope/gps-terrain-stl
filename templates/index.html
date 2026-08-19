@@ -424,6 +424,11 @@
             <span class="unit">mm über Basis (Plattendicke = base + relief)</span>
           </div>
           <div class="form-group">
+            <label for="elevation_split">Höhen-Split</label>
+            <input type="number" id="elevation_split" name="elevation_split" value="" step="50" min="0" max="5000" placeholder="leer = aus">
+            <span class="unit">m ü. M. (splittet Terrain für 2-Farb-Druck)</span>
+          </div>
+          <div class="form-group">
             <label for="resolution">Resolution</label>
             <input type="number" id="resolution" name="resolution" value="512" step="64" min="64" max="2000">
             <span class="unit">pixels per side</span>
@@ -711,13 +716,17 @@
 
     // Colors for terrain, track, water (matched by filename suffix order)
     const partColors = {
-      terrain: 0xb0b8c8,
-      track:   0xff6644,
-      water:   0x4499dd,
+      terrain:      0xb0b8c8,
+      terrain_low:  0x7ea274,   // green — vegetation zone below the split
+      terrain_high: 0xf0f2f5,   // near-white — snow / rock zone above
+      track:        0xff6644,
+      water:        0x4499dd,
     };
 
     function classifyPart(name) {
       const lower = name.toLowerCase();
+      if (lower.endsWith('_terrain_low.stl'))  return 'terrain_low';
+      if (lower.endsWith('_terrain_high.stl')) return 'terrain_high';
       if (lower.endsWith('_terrain.stl')) return 'terrain';
       if (lower.endsWith('_track.stl'))   return 'track';
       if (lower.endsWith('_water.stl'))   return 'water';

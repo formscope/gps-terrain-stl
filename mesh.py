@@ -8,6 +8,161 @@ from stl import mesh as stl_mesh
 VALID_SHAPES = ("circle", "square", "hexagon", "rectangle")
 
 
+def _split_mesh_at_z(triangles: list, z_split: float) -> tuple[list, list]:
+    """Split a closed triangle mesh in two along the horizontal plane z = z_split.
+
+    Each triangle either lands fully in one half or is cut by the plane; a
+    cut triangle contributes 1 to one half and 2 to the other.  New edges
+    created on the split plane are collected and used to triangulate a flat
+    cap surface that closes both halves.  Returns (low_triangles, high_triangles).
+    """
+    EPS = 1e-6
+
+    def z(v):
+        return v[2]
+
+    def lerp(a, b, t):
+        return (a[0] + (b[0] - a[0]) * t,
+                a[1] + (b[1] - a[1]) * t,
+                z_split)
+
+    def cross_point(a, b):
+        t = (z_split - z(a)) / (z(b) - z(a))
+        return lerp(a, b, t)
+
+    low_tris: list = []
+    high_tris: list = []
+    cut_edges: list = []   # list of (p_start, p_end) on the split plane
+
+    for tri in triangles:
+        v0, v1, v2 = tri
+        zs = [z(v0), z(v1), z(v2)]
+        below = [zi < z_split - EPS for zi in zs]
+        above = [zi > z_split + EPS for zi in zs]
+        if not any(above):
+            low_tris.append(tri)
+            continue
+        if not any(below):
+            high_tris.append(tri)
+            continue
+
+        # Mixed — order verts so that we can classify the "single" side.
+        verts = [v0, v1, v2]
+        below_idx = [i for i, b in enumerate(below) if b]
+        above_idx = [i for i, b in enumerate(above) if b]
+        if len(below_idx) == 1:
+            # one below (V), two above (A, B); pattern V, A, B in original order
+            i_v = below_idx[0]
+            i_a, i_b = [i for i in range(3) if i != i_v]
+            V, A, B = verts[i_v], verts[i_a], verts[i_b]
+            single_below = True
+        else:  # 1 above, 2 below
+            i_v = above_idx[0]
+            i_a, i_b = [i for i in range(3) if i != i_v]
+            V, A, B = verts[i_v], verts[i_a], verts[i_b]
+            single_below = False
+
+        # Ensure (V, A, B) preserves original winding (V, A, B -> even permutation of 0,1,2).
+        if (i_v, i_a, i_b) not in ((0,1,2),(1,2,0),(2,0,1)):
+            A, B = B, A
+            i_a, i_b = i_b, i_a
+
+        P_va = cross_point(V, A)   # on edge V-A
+        P_vb = cross_point(V, B)   # on edge V-B
+
+        if single_below:
+            # V is below, A and B are above.  Below side: single triangle
+            # (V, P_va, P_vb).  Above side: quad (P_va, A, B, P_vb) -> 2 tris.
+            low_tris.append((V, P_va, P_vb))
+            high_tris.append((P_va, A, B))
+            high_tris.append((P_va, B, P_vb))
+            # New cap edge goes from P_va to P_vb (below side sees it CCW).
+            cut_edges.append((P_va, P_vb))
+        else:
+            # V is above, A and B are below.
+            high_tris.append((V, P_va, P_vb))
+            low_tris.append((P_va, A, B))
+            low_tris.append((P_va, B, P_vb))
+            # The cap edge for the below side runs from P_vb to P_va.
+            cut_edges.append((P_vb, P_va))
+
+    # Triangulate the cap (polygon on the split plane) with shapely.
+    cap_tris_low, cap_tris_high = _triangulate_split_cap(cut_edges, z_split)
+    low_tris.extend(cap_tris_low)
+    high_tris.extend(cap_tris_high)
+    return low_tris, high_tris
+
+
+def _triangulate_split_cap(edges: list, z_split: float) -> tuple[list, list]:
+    """Stitch the cap-plane edges into polygons and triangulate them.
+    Returns (cap_for_low, cap_for_high) — same triangles but with opposite
+    winding so each half's cap normal points into the outside of that half.
+    """
+    if not edges:
+        return [], []
+    try:
+        from shapely.geometry import Polygon as _SPoly, MultiPolygon
+        from shapely.ops import polygonize, unary_union
+        from shapely.geometry.polygon import orient as _orient
+        import shapely as shp
+    except Exception:
+        return [], []
+
+    # Merge the cut edges into a MultiLineString then polygonize.
+    from shapely.geometry import MultiLineString, LineString
+    lines = MultiLineString([LineString([e[0][:2], e[1][:2]]) for e in edges])
+    try:
+        merged = unary_union(lines)
+        polys = list(polygonize(merged))
+    except Exception:
+        polys = []
+
+    if not polys:
+        return [], []
+
+    # Combine and orient consistently.
+    try:
+        combined = unary_union(polys)
+    except Exception:
+        combined = polys[0]
+    if isinstance(combined, _SPoly):
+        poly_list = [combined]
+    elif hasattr(combined, "geoms"):
+        poly_list = [g for g in combined.geoms if isinstance(g, _SPoly)]
+    else:
+        poly_list = []
+
+    tris_2d = []
+    for poly in poly_list:
+        poly = _orient(poly, sign=1.0)
+        try:
+            if hasattr(shp, "constrained_delaunay_triangles"):
+                tc = shp.constrained_delaunay_triangles(poly)
+                for g in tc.geoms:
+                    tris_2d.append(list(g.exterior.coords)[:3])
+            else:
+                tc = shp.delaunay_triangles(poly, only_edges=False)
+                for g in tc.geoms:
+                    if poly.contains(g.representative_point()):
+                        tris_2d.append(list(g.exterior.coords)[:3])
+        except Exception:
+            continue
+
+    cap_for_low = []   # normal points +z (into the empty space above the low half)
+    cap_for_high = []  # normal points -z (into the empty space below the high half)
+    for (x0, y0), (x1, y1), (x2, y2) in tris_2d:
+        # CCW in plan gives +z normal.
+        cross = (x1 - x0) * (y2 - y0) - (y1 - y0) * (x2 - x0)
+        if cross < 0:
+            (x1, y1), (x2, y2) = (x2, y2), (x1, y1)
+        a = (x0, y0, z_split)
+        b = (x1, y1, z_split)
+        c = (x2, y2, z_split)
+        cap_for_low.append((a, b, c))            # normal up
+        cap_for_high.append((a, c, b))           # normal down
+    return cap_for_low, cap_for_high
+
+
 def _generate_shape_ring(shape: str, radius_mm: float, N: int,
                           width_mm: float | None = None,
                           height_mm: float | None = None):
@@ -137,6 +292,7 @@ def build_and_export(
     max_relief_mm: float = 5.0,
     elev_min_override: float | None = None,
     elev_max_override: float | None = None,
+    elevation_split_m: float | None = None,
 ) -> None:
     """
     Build a solid terrain STL plus a track-tube body.
@@ -949,8 +1105,34 @@ def build_and_export(
     track_path = f"{base}_track{ext}"
     water_path = f"{base}_water{ext}"
 
-    _save_stl(terrain_tris, terrain_path)
-    print(f"  Saved: {terrain_path}")
+    # Optional: split the terrain solid horizontally at a real-world elevation
+    # (e.g. 1800 m for the tree line / snow line) so it can be printed in two
+    # different filament colours.  Everything below stays as _terrain_low.stl,
+    # everything above becomes _terrain_high.stl.  A flat cap is added at the
+    # split plane so both halves are watertight.
+    split_saved = False
+    if elevation_split_m is not None and terrain_tris:
+        z_split = (float(elevation_split_m) - elev_min) * scale_z + base_height_mm
+        z_top_terrain = float(np.max([v[2] for tri in terrain_tris for v in tri]))
+        z_bot_terrain = float(np.min([v[2] for tri in terrain_tris for v in tri]))
+        if z_bot_terrain < z_split < z_top_terrain:
+            try:
+                low_tris, high_tris = _split_mesh_at_z(terrain_tris, z_split)
+                low_path = f"{base}_terrain_low{ext}"
+                high_path = f"{base}_terrain_high{ext}"
+                if low_tris:
+                    _save_stl(low_tris, low_path)
+                    print(f"  Saved: {low_path}  ({len(low_tris)} tris, below {elevation_split_m:.0f} m)")
+                if high_tris:
+                    _save_stl(high_tris, high_path)
+                    print(f"  Saved: {high_path}  ({len(high_tris)} tris, above {elevation_split_m:.0f} m)")
+                split_saved = bool(low_tris) or bool(high_tris)
+            except Exception as exc:
+                print(f"  Terrain split failed ({exc}); saving single terrain STL instead.")
+
+    if not split_saved:
+        _save_stl(terrain_tris, terrain_path)
+        print(f"  Saved: {terrain_path}")
 
     if track_tris:
         _save_stl(track_tris, track_path)

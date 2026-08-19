@@ -75,6 +75,8 @@ def generate():
     rivers = request.form.get("rivers") == "on"
     river_width = float(request.form.get("river_width", 0.9))
     max_relief = float(request.form.get("max_relief", 5.0))
+    _split_raw = (request.form.get("elevation_split") or "").strip()
+    elevation_split_m = float(_split_raw) if _split_raw else None
     no_water = request.form.get("no_water") == "on"
 
     # Save uploaded file to temp dir
@@ -165,7 +167,8 @@ def generate():
             tile_elev_min, tile_elev_max = None, None
 
         stl_base = os.path.splitext(input_path)[0]
-        part_suffixes = ["_terrain", "_track", "_water"]
+        part_suffixes = ["_terrain", "_terrain_low", "_terrain_high",
+                          "_track", "_water"]
         stl_files: list[tuple[str, str]] = []  # (disk path, arcname)
 
         for tile in tiles:
@@ -201,6 +204,7 @@ def generate():
                 max_relief_mm=max_relief,
                 elev_min_override=tile_elev_min,
                 elev_max_override=tile_elev_max,
+                elevation_split_m=elevation_split_m,
             )
 
             tile_base = os.path.splitext(tile_output)[0]

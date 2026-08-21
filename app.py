@@ -167,8 +167,10 @@ def generate():
             tile_elev_min, tile_elev_max = None, None
 
         stl_base = os.path.splitext(input_path)[0]
-        part_suffixes = ["_terrain", "_terrain_low", "_terrain_high",
-                          "_track", "_water"]
+        # The elevation split is delivered as a 3MF (STL cannot carry two
+        # separately colourable parts), so the extension varies per suffix.
+        part_specs = [("_terrain", ".stl"), ("_terrain_split", ".3mf"),
+                      ("_track", ".stl"), ("_water", ".stl")]
         stl_files: list[tuple[str, str]] = []  # (disk path, arcname)
 
         for tile in tiles:
@@ -208,10 +210,10 @@ def generate():
             )
 
             tile_base = os.path.splitext(tile_output)[0]
-            for suf in part_suffixes:
-                p = f"{tile_base}{suf}.stl"
+            for suf, suf_ext in part_specs:
+                p = f"{tile_base}{suf}{suf_ext}"
                 if os.path.exists(p):
-                    arc = f"{base_name}{tile_label}{suf}.stl"
+                    arc = f"{base_name}{tile_label}{suf}{suf_ext}"
                     stl_files.append((p, arc))
 
         buf = io.BytesIO()

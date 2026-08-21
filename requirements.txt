@@ -9,3 +9,4 @@ shapely>=2.0
 flask>=3.0
 trimesh>=4.0
 networkx>=3.0
+mapbox_earcut>=1.0

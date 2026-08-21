@@ -426,7 +426,7 @@
           <div class="form-group">
             <label for="elevation_split">Höhen-Split</label>
             <input type="number" id="elevation_split" name="elevation_split" value="" step="50" min="0" max="5000" placeholder="leer = aus">
-            <span class="unit">m ü. M. (splittet Terrain für 2-Farb-Druck)</span>
+            <span class="unit">m ü. M. — erzeugt zusätzlich _terrain_split.3mf mit 2 Teilen für 2-Farb-Druck</span>
           </div>
           <div class="form-group">
             <label for="resolution">Resolution</label>
@@ -725,8 +725,6 @@
 
     function classifyPart(name) {
       const lower = name.toLowerCase();
-      if (lower.endsWith('_terrain_low.stl'))  return 'terrain_low';
-      if (lower.endsWith('_terrain_high.stl')) return 'terrain_high';
       if (lower.endsWith('_terrain.stl')) return 'terrain';
       if (lower.endsWith('_track.stl'))   return 'track';
       if (lower.endsWith('_water.stl'))   return 'water';

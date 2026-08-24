@@ -8,71 +8,6 @@ from stl import mesh as stl_mesh
 VALID_SHAPES = ("circle", "square", "hexagon", "rectangle")
 
 
-def _split_mesh_at_z(triangles: list, z_split: float,
-                     overlap_mm: float = 0.06) -> tuple[list, list]:
-    """Split a closed triangle mesh horizontally at z = z_split.
-
-    Returns (low_triangles, high_triangles), each a watertight solid with a
-    flat cap on the split plane.  The high half is cut `overlap_mm` LOWER
-    than the low half, so the two solids overlap by a fraction of a layer
-    height instead of sharing a surface.  That keeps them as two separate
-    shells when both are written into a single STL, which is what lets
-    BambuStudio / OrcaSlicer offer them as a multi-part object with a
-    per-part filament choice.  The overlap is far below one layer, so the
-    slicer fuses them into a solid print with no visible seam.
-    """
-    import trimesh
-
-    verts = np.array([v for tri in triangles for v in tri], dtype=np.float64)
-    faces = np.arange(len(verts)).reshape(-1, 3)
-    mesh = trimesh.Trimesh(vertices=verts, faces=faces, process=True)
-
-    low = mesh.slice_plane(plane_origin=[0.0, 0.0, z_split],
-                           plane_normal=[0.0, 0.0, -1.0], cap=True)
-    high = mesh.slice_plane(plane_origin=[0.0, 0.0, z_split - overlap_mm],
-                            plane_normal=[0.0, 0.0, 1.0], cap=True)
-
-    def clean(m):
-        if m is None or len(m.faces) == 0:
-            return None
-        m.update_faces(m.nondegenerate_faces())
-        m.remove_unreferenced_vertices()
-        # Slicing can leave the cap wound the wrong way round, which shows up
-        # as a negative volume and confuses slicers; re-derive the normals.
-        try:
-            trimesh.repair.fix_normals(m)
-        except Exception:
-            pass
-        return m
-
-    return clean(low), clean(high)
-
-
-def _save_3mf_two_parts(low_mesh, high_mesh, path: str) -> bool:
-    """Write both halves into ONE 3MF file as two named parts.
-
-    STL cannot express this: two shells that touch get welded together when a
-    slicer merges coincident vertices, so a single STL can never offer two
-    separately colourable regions.  3MF keeps them as distinct objects in one
-    file, which is what BambuStudio / OrcaSlicer need to let you assign a
-    different filament to each.
-    """
-    try:
-        import trimesh
-        scene = trimesh.Scene()
-        if low_mesh is not None:
-            scene.add_geometry(low_mesh, node_name="terrain_low",
-                               geom_name="terrain_low")
-        if high_mesh is not None:
-            scene.add_geometry(high_mesh, node_name="terrain_high",
-                               geom_name="terrain_high")
-        scene.export(path)
-        return True
-    except Exception as exc:
-        print(f"  3MF export failed: {exc}")
-        return False
-
-
 def _generate_shape_ring(shape: str, radius_mm: float, N: int,
                           width_mm: float | None = None,
                           height_mm: float | None = None):
@@ -202,7 +137,6 @@ def build_and_export(
     max_relief_mm: float = 5.0,
     elev_min_override: float | None = None,
     elev_max_override: float | None = None,
-    elevation_split_m: float | None = None,
 ) -> None:
     """
     Build a solid terrain STL plus a track-tube body.
@@ -1015,37 +949,7 @@ def build_and_export(
     track_path = f"{base}_track{ext}"
     water_path = f"{base}_water{ext}"
 
-    # Optional: split the terrain horizontally at a real-world elevation
-    # (e.g. 1800 m for the tree line / snow line) for two-colour printing.
-    #
-    # The split goes into an extra 3MF file, NOT into the STL: two shells that
-    # touch are welded back together the moment a slicer merges coincident
-    # vertices, so a single STL can never carry two separately colourable
-    # regions.  3MF keeps them as two named parts in one file, which is what
-    # BambuStudio needs for a per-part filament choice.  The plain
-    # _terrain.stl is still written unchanged for anyone who wants one solid.
-    terrain_out = terrain_tris
-    if elevation_split_m is not None and terrain_tris:
-        z_split = (float(elevation_split_m) - elev_min) * scale_z + base_height_mm
-        z_top_terrain = float(np.max([v[2] for tri in terrain_tris for v in tri]))
-        z_bot_terrain = float(np.min([v[2] for tri in terrain_tris for v in tri]))
-        if z_bot_terrain < z_split < z_top_terrain:
-            try:
-                low_mesh, high_mesh = _split_mesh_at_z(terrain_tris, z_split)
-                split_path = f"{base}_terrain_split.3mf"
-                if _save_3mf_two_parts(low_mesh, high_mesh, split_path):
-                    n_low = len(low_mesh.faces) if low_mesh is not None else 0
-                    n_high = len(high_mesh.faces) if high_mesh is not None else 0
-                    print(f"  Saved: {split_path}  "
-                          f"(2 parts: {n_low} tris below / {n_high} tris above "
-                          f"{elevation_split_m:.0f} m)")
-            except Exception as exc:
-                print(f"  Terrain split failed ({exc}); only the plain terrain STL was written.")
-        else:
-            print(f"  Elevation split at {elevation_split_m:.0f} m is outside the "
-                  f"terrain range — no split written.")
-
-    _save_stl(terrain_out, terrain_path)
+    _save_stl(terrain_tris, terrain_path)
     print(f"  Saved: {terrain_path}")
 
     if track_tris:

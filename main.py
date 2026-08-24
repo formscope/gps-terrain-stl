@@ -46,10 +46,6 @@ def main():
     parser.add_argument("--max-relief", type=float, default=5.0,
                         help="Cap on the terrain relief in mm above the base "
                              "(default 5 mm). Prevents extremely thick plates.")
-    parser.add_argument("--elevation-split", type=float, default=None,
-                        help="Split the terrain STL horizontally at this "
-                             "elevation (metres). Produces _terrain_low.stl "
-                             "and _terrain_high.stl for two-colour printing.")
     parser.add_argument("--resolution", type=int, default=512,
                         help="Raster/grid resolution (pixels per side, max 2000)")
     parser.add_argument("--base-height", type=float, default=3.0,
@@ -221,7 +217,6 @@ def main():
             max_relief_mm=args.max_relief,
             elev_min_override=tile_elev_min,
             elev_max_override=tile_elev_max,
-            elevation_split_m=args.elevation_split,
         )
     print("Done.")
 

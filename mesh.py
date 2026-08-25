@@ -21,23 +21,27 @@ def _tris_to_trimesh(triangles):
     return m
 
 
-def _split_terrain_at_z(terrain_tris, z_split, overlap_mm=0.06):
-    """Slice a terrain mesh horizontally at z_split into two watertight halves.
+def _split_terrain_at_z(terrain_tris, z_split, shell_thickness_mm=0.4):
+    """Return (base_mesh, cap_mesh) for a two-colour terrain print.
 
-    Returns (low_mesh, high_mesh) as trimesh.Trimesh objects.  Slicing uses
-    trimesh's slice_plane with cap=True (needs mapbox_earcut).  A tiny
-    `overlap_mm` (well below one layer height) keeps the halves internally
-    consistent even when the source mesh has small self-intersections; the
-    printed result fuses seamlessly.
+    * base_mesh: the full unmodified terrain solid (prints with colour A).
+    * cap_mesh:  a thin closed shell that sits ON TOP of the terrain surface,
+                 present only where the terrain is above z_split — i.e. it
+                 hugs the mountain peaks like a snow cap and leaves the
+                 valleys untouched (no flat plate covering them).
+
+    Thickness of the cap is `shell_thickness_mm` (default 0.4 mm ≈ 2 layers);
+    the print keeps the natural relief with only a barely-visible bump on
+    high-elevation surfaces.  In the slicer the cap object is assigned a
+    different filament than the base.
     """
     import trimesh
-    mesh = _tris_to_trimesh(terrain_tris)
-    if mesh is None or len(mesh.faces) == 0:
+    base = _tris_to_trimesh(terrain_tris)
+    if base is None or len(base.faces) == 0:
         return None, None
-    low = mesh.slice_plane(plane_origin=[0.0, 0.0, z_split],
-                           plane_normal=[0.0, 0.0, -1.0], cap=True)
-    high = mesh.slice_plane(plane_origin=[0.0, 0.0, z_split - overlap_mm],
-                            plane_normal=[0.0, 0.0, +1.0], cap=True)
+
+    cap_tris = _build_upper_shell(base, z_split, shell_thickness_mm)
+    cap = _tris_to_trimesh(cap_tris) if cap_tris else None
 
     def clean(m):
         if m is None or len(m.faces) == 0:
@@ -50,7 +54,115 @@ def _split_terrain_at_z(terrain_tris, z_split, overlap_mm=0.06):
             pass
         return m
 
-    return clean(low), clean(high)
+    return clean(base), clean(cap)
+
+
+def _build_upper_shell(terrain_mesh, z_split: float,
+                        thickness_mm: float = 0.4):
+    """Build a thin closed shell over the terrain surface where z > z_split.
+
+    Returns a list of triangles ((x,y,z), (x,y,z), (x,y,z)).  The shell
+    follows the terrain surface exactly on its underside and is offset by
+    `thickness_mm` upward on its top; boundary walls close it along the
+    z_split contour.  Terrain triangles crossing the contour are split so
+    the shell edge sits precisely on the 1800 m (or whatever) contour line.
+    """
+    verts = terrain_mesh.vertices
+    faces = terrain_mesh.faces
+    face_normals = terrain_mesh.face_normals
+
+    UP_THRESHOLD = 0.2   # face normals with z > this count as terrain top
+    delta = float(thickness_mm)
+    if delta <= 0:
+        return []
+
+    def offset(p):
+        return (p[0], p[1], p[2] + delta)
+
+    def edge_split(pa, pb):
+        # Return the point where edge pa→pb crosses z = z_split.
+        za, zb = pa[2], pb[2]
+        t = (z_split - za) / (zb - za) if abs(zb - za) > 1e-12 else 0.0
+        return (pa[0] + t * (pb[0] - pa[0]),
+                pa[1] + t * (pb[1] - pa[1]),
+                z_split)
+
+    triangles = []
+    contour_edges = []   # list of (p_a, p_b) segments on z=z_split
+
+    for f_idx, f in enumerate(faces):
+        # Only take the terrain's UPWARD-facing surface.  The base plate's
+        # walls and bottom aren't part of the "top skin" and stay out of
+        # the shell.
+        if face_normals[f_idx, 2] <= UP_THRESHOLD:
+            continue
+
+        p0, p1, p2 = verts[f[0]], verts[f[1]], verts[f[2]]
+        p0 = (float(p0[0]), float(p0[1]), float(p0[2]))
+        p1 = (float(p1[0]), float(p1[1]), float(p1[2]))
+        p2 = (float(p2[0]), float(p2[1]), float(p2[2]))
+
+        above = [p[2] > z_split for p in (p0, p1, p2)]
+        n_above = sum(above)
+        if n_above == 0:
+            continue
+
+        if n_above == 3:
+            # Fully above — whole triangle contributes to the shell.
+            _add_shell_triangle(triangles, p0, p1, p2, offset)
+            continue
+
+        # Straddles the contour: split.  Find the "single" side.
+        pts = [p0, p1, p2]
+        if n_above == 1:
+            i_a = above.index(True)
+            i_b, i_c = [i for i in range(3) if i != i_a]
+            a = pts[i_a]; b = pts[i_b]; c = pts[i_c]
+            e_ab = edge_split(a, b)
+            e_ac = edge_split(a, c)
+            # Preserve CCW winding of the original triangle.
+            if (i_a, i_b, i_c) in ((0, 1, 2), (1, 2, 0), (2, 0, 1)):
+                _add_shell_triangle(triangles, a, e_ab, e_ac, offset)
+                contour_edges.append((e_ab, e_ac))
+            else:
+                _add_shell_triangle(triangles, a, e_ac, e_ab, offset)
+                contour_edges.append((e_ac, e_ab))
+        else:  # n_above == 2
+            i_c = above.index(False)
+            i_a, i_b = [i for i in range(3) if i != i_c]
+            a = pts[i_a]; b = pts[i_b]; c = pts[i_c]
+            e_ac = edge_split(a, c)
+            e_bc = edge_split(b, c)
+            if (i_a, i_b, i_c) in ((0, 1, 2), (1, 2, 0), (2, 0, 1)):
+                _add_shell_triangle(triangles, a, b, e_bc, offset)
+                _add_shell_triangle(triangles, a, e_bc, e_ac, offset)
+                contour_edges.append((e_bc, e_ac))
+            else:
+                _add_shell_triangle(triangles, a, e_bc, b, offset)
+                _add_shell_triangle(triangles, a, e_ac, e_bc, offset)
+                contour_edges.append((e_ac, e_bc))
+
+    # Close the shell along its contour with a vertical rim of height `delta`.
+    for (a, b) in contour_edges:
+        a_low  = a
+        b_low  = b
+        a_high = offset(a)
+        b_high = offset(b)
+        # Side wall (outward-facing).  Winding chosen so the normal points
+        # away from the mountain (into open air, matching the CCW top).
+        triangles.append((a_low, b_low, b_high))
+        triangles.append((a_low, b_high, a_high))
+
+    return triangles
+
+
+def _add_shell_triangle(out, p0, p1, p2, offset_fn):
+    """Add a shell triangle plus its offset twin (top + bottom of the shell)."""
+    # Top face: offset by +delta, same winding as source (normal up).
+    out.append((offset_fn(p0), offset_fn(p1), offset_fn(p2)))
+    # Bottom face: original z, winding reversed so the normal points down
+    # (into the terrain interior below the shell).
+    out.append((p0, p2, p1))
 
 
 def _save_3mf_parts(parts: list, path: str) -> bool:
@@ -1033,22 +1145,26 @@ def build_and_export(
         z_bot_terrain = float(np.min([v[2] for tri in terrain_tris for v in tri]))
         if z_bot_terrain < z_split < z_top_terrain:
             try:
-                low_mesh, high_mesh = _split_terrain_at_z(terrain_tris, z_split)
+                base_mesh, cap_mesh = _split_terrain_at_z(terrain_tris, z_split)
                 track_mesh = _tris_to_trimesh(track_tris) if track_tris else None
                 water_mesh = _tris_to_trimesh(water_tris) if water_tris else None
+                # terrain_base carries the full relief in filament A.  The thin
+                # terrain_high_cap sits on top wherever elevation > z_split and
+                # gets filament B — the valleys stay uncovered because the cap
+                # only follows the mountain surface, no flat plate.
                 parts = [
-                    ("terrain_low",  low_mesh),
-                    ("terrain_high", high_mesh),
-                    ("track",        track_mesh),
-                    ("water",        water_mesh),
+                    ("terrain_base",     base_mesh),
+                    ("terrain_high_cap", cap_mesh),
+                    ("track",            track_mesh),
+                    ("water",            water_mesh),
                 ]
                 path_3mf = f"{base}.3mf"
                 if _save_3mf_parts(parts, path_3mf):
-                    n_low  = len(low_mesh.faces)  if low_mesh  is not None else 0
-                    n_high = len(high_mesh.faces) if high_mesh is not None else 0
-                    print(f"  Saved: {path_3mf}  (split at {elevation_split_m:.0f} m: "
-                          f"{n_low} tris below / {n_high} tris above; "
-                          f"plus track and water parts)")
+                    n_base = len(base_mesh.faces) if base_mesh is not None else 0
+                    n_cap  = len(cap_mesh.faces)  if cap_mesh  is not None else 0
+                    print(f"  Saved: {path_3mf}  (base {n_base} tris + "
+                          f"{n_cap}-tri cap above {elevation_split_m:.0f} m; "
+                          f"plus track and water)")
                     split_done = True
                 else:
                     print(f"  3MF export produced no parts; falling back to STL output.")

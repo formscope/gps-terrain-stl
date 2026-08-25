@@ -718,23 +718,23 @@
       renderer.render(scene, camera);
     }
 
-    // Colours per part.  terrain_low / terrain_high are used only when the
-    // download is a .3mf with an elevation split; regular STL parts use the
-    // plain "terrain" colour.
+    // Colours per part.  terrain_base carries the full relief and gets the
+    // "low / valley" colour.  terrain_high_cap is a thin skin that only
+    // exists above the elevation split, so we paint it in the "high" colour.
     const partColors = {
-      terrain:      0xb0b8c8,
-      terrain_low:  0x7ea274,   // green — vegetation zone below the split
-      terrain_high: 0xf0f2f5,   // near-white — snow / rock zone above
-      track:        0xff6644,
-      water:        0x4499dd,
+      terrain:          0xb0b8c8,
+      terrain_base:     0x7ea274,   // green — vegetation zone (all the relief)
+      terrain_high_cap: 0xf0f2f5,   // near-white — snow / rock cap on the peaks
+      track:            0xff6644,
+      water:            0x4499dd,
     };
 
     function classifyPart(name) {
       const lower = name.toLowerCase();
-      if (lower === 'terrain_low' || lower.endsWith('_terrain_low'))   return 'terrain_low';
-      if (lower === 'terrain_high' || lower.endsWith('_terrain_high')) return 'terrain_high';
-      if (lower === 'track'   || lower.endsWith('_track'))   return 'track';
-      if (lower === 'water'   || lower.endsWith('_water'))   return 'water';
+      if (lower === 'terrain_base'     || lower.endsWith('_terrain_base'))     return 'terrain_base';
+      if (lower === 'terrain_high_cap' || lower.endsWith('_terrain_high_cap')) return 'terrain_high_cap';
+      if (lower === 'track' || lower.endsWith('_track'))                       return 'track';
+      if (lower === 'water' || lower.endsWith('_water'))                       return 'water';
       if (lower.endsWith('_terrain.stl')) return 'terrain';
       if (lower.endsWith('_track.stl'))   return 'track';
       if (lower.endsWith('_water.stl'))   return 'water';

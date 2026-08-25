@@ -424,6 +424,11 @@
             <span class="unit">mm über Basis (Plattendicke = base + relief)</span>
           </div>
           <div class="form-group">
+            <label for="elevation_split">Höhen-Split</label>
+            <input type="number" id="elevation_split" name="elevation_split" value="" step="50" min="0" max="8000" placeholder="leer = aus">
+            <span class="unit">m ü. M. — Ausgabe wird ein .3mf mit 2 Farbteilen</span>
+          </div>
+          <div class="form-group">
             <label for="resolution">Resolution</label>
             <input type="number" id="resolution" name="resolution" value="512" step="64" min="64" max="2000">
             <span class="unit">pixels per side</span>
@@ -612,17 +617,20 @@
         const JSZip = JSZipModule.default || JSZipModule;
         const zip = await JSZip.loadAsync(blob);
 
-        const stlEntries = [];   // [{ name, buf }]
-        const stlNames = [];
+        // Pull every mesh file from the ZIP: STL (default) or 3MF (when the
+        // download carries an elevation split with named colour parts).
+        const meshEntries = [];   // [{ name, buf }]
+        const meshNames = [];
         zip.forEach((path) => {
-          if (path.endsWith('.stl')) stlNames.push(path);
+          const lower = path.toLowerCase();
+          if (lower.endsWith('.stl') || lower.endsWith('.3mf')) meshNames.push(path);
         });
-        for (const name of stlNames) {
+        for (const name of meshNames) {
           const buf = await zip.file(name).async('arraybuffer');
-          stlEntries.push({ name, buf });
+          meshEntries.push({ name, buf });
         }
-        if (stlEntries.length > 0) {
-          showSTLMultiple(stlEntries);
+        if (meshEntries.length > 0) {
+          showSTLMultiple(meshEntries);
         }
 
         viewerWrapper.classList.add('visible');
@@ -641,6 +649,7 @@
     import * as THREE from 'three';
     import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
     import { STLLoader } from 'three/addons/loaders/STLLoader.js';
+    import { ThreeMFLoader } from 'three/addons/loaders/3MFLoader.js';
 
     const container = document.getElementById('viewer-container');
     const hint = document.getElementById('viewer-hint');
@@ -709,15 +718,23 @@
       renderer.render(scene, camera);
     }
 
-    // Colors for terrain, track, water (matched by filename suffix order)
+    // Colours per part.  terrain_low / terrain_high are used only when the
+    // download is a .3mf with an elevation split; regular STL parts use the
+    // plain "terrain" colour.
     const partColors = {
-      terrain: 0xb0b8c8,
-      track:   0xff6644,
-      water:   0x4499dd,
+      terrain:      0xb0b8c8,
+      terrain_low:  0x7ea274,   // green — vegetation zone below the split
+      terrain_high: 0xf0f2f5,   // near-white — snow / rock zone above
+      track:        0xff6644,
+      water:        0x4499dd,
     };
 
     function classifyPart(name) {
       const lower = name.toLowerCase();
+      if (lower === 'terrain_low' || lower.endsWith('_terrain_low'))   return 'terrain_low';
+      if (lower === 'terrain_high' || lower.endsWith('_terrain_high')) return 'terrain_high';
+      if (lower === 'track'   || lower.endsWith('_track'))   return 'track';
+      if (lower === 'water'   || lower.endsWith('_water'))   return 'water';
       if (lower.endsWith('_terrain.stl')) return 'terrain';
       if (lower.endsWith('_track.stl'))   return 'track';
       if (lower.endsWith('_water.stl'))   return 'water';
@@ -745,28 +762,68 @@
       }
       currentMesh = [];
 
-      const loader = new STLLoader();
+      const stlLoader  = new STLLoader();
+      const mmfLoader  = new ThreeMFLoader();
+
+      // Expand entries: a .3mf holds several named parts, we turn each part
+      // into its own {name, geometry} so the rest of the code treats it just
+      // like an STL entry.
+      const flatEntries = [];
+      entries.forEach(({ name, buf }) => {
+        const lower = name.toLowerCase();
+        if (lower.endsWith('.3mf')) {
+          try {
+            const group = mmfLoader.parse(buf);
+            group.traverse(obj => {
+              if (obj.isMesh && obj.geometry) {
+                // 3MFLoader bakes each part's transform into the parent
+                // object; apply it to the geometry so our subsequent
+                // bbox / camera fit works in world space.
+                obj.updateMatrixWorld(true);
+                const geom = obj.geometry.clone();
+                geom.applyMatrix4(obj.matrixWorld);
+                flatEntries.push({
+                  name: (obj.name || 'part') + '__from__' + name,
+                  partName: obj.name || 'part',
+                  parentName: name,
+                  geometry: geom,
+                });
+              }
+            });
+          } catch (err) {
+            console.error('3MF parse failed:', err);
+          }
+        } else {
+          const geom = stlLoader.parse(buf);
+          flatEntries.push({
+            name,
+            partName: name,
+            parentName: name,
+            geometry: geom,
+          });
+        }
+      });
 
       // Group entries by tile. Each tile becomes its own THREE.Group so we
-      // can offset them side-by-side along the long axis.
-      const tiles = new Map();   // key: tileIndex (1-based, or 0 for non-tiled)
+      // can offset them side-by-side along the long axis.  A .3mf is tagged
+      // with its own name so all its parts share one tile.
+      const tiles = new Map();
       let total = 1;
-      entries.forEach(({ name, buf }) => {
-        const tk = tileKey(name);
+      flatEntries.forEach((e) => {
+        const tk = tileKey(e.parentName);
         const idx = tk ? tk.index : 0;
         if (tk) total = Math.max(total, tk.total);
         if (!tiles.has(idx)) tiles.set(idx, []);
-        tiles.get(idx).push({ name, buf });
+        tiles.get(idx).push(e);
       });
 
       const tileGroups = [];
       [...tiles.keys()].sort((a, b) => a - b).forEach((idx) => {
         const tileGroup = new THREE.Group();
         tileGroup.userData.tileIndex = idx;
-        tiles.get(idx).forEach(({ name, buf }) => {
-          const geometry = loader.parse(buf);
+        tiles.get(idx).forEach(({ partName, geometry }) => {
           geometry.computeVertexNormals();
-          const key = classifyPart(name);
+          const key = classifyPart(partName);
           const material = new THREE.MeshStandardMaterial({
             color: partColors[key],
             metalness: 0.1,

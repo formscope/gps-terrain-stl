@@ -75,6 +75,8 @@ def generate():
     rivers = request.form.get("rivers") == "on"
     river_width = float(request.form.get("river_width", 0.9))
     max_relief = float(request.form.get("max_relief", 5.0))
+    _split_raw = (request.form.get("elevation_split") or "").strip()
+    elevation_split_m = float(_split_raw) if _split_raw else None
     no_water = request.form.get("no_water") == "on"
 
     # Save uploaded file to temp dir
@@ -199,16 +201,26 @@ def generate():
                 rotation_rad=rotation_rad,
                 cut_edges=tile["cut_edges"] if tile["cut_edges"] else None,
                 max_relief_mm=max_relief,
+                elevation_split_m=elevation_split_m,
                 elev_min_override=tile_elev_min,
                 elev_max_override=tile_elev_max,
             )
 
             tile_base = os.path.splitext(tile_output)[0]
-            for suf in part_suffixes:
-                p = f"{tile_base}{suf}.stl"
+            # When the elevation split is on, the plate is delivered as a
+            # single .3mf per tile (containing terrain_low + terrain_high +
+            # track + water as named parts).  No STLs are written.
+            if elevation_split_m is not None:
+                p = f"{tile_base}.3mf"
                 if os.path.exists(p):
-                    arc = f"{base_name}{tile_label}{suf}.stl"
+                    arc = f"{base_name}{tile_label}.3mf"
                     stl_files.append((p, arc))
+            else:
+                for suf in part_suffixes:
+                    p = f"{tile_base}{suf}.stl"
+                    if os.path.exists(p):
+                        arc = f"{base_name}{tile_label}{suf}.stl"
+                        stl_files.append((p, arc))
 
         buf = io.BytesIO()
         with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:

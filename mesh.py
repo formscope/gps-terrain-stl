@@ -8,6 +8,78 @@ from stl import mesh as stl_mesh
 VALID_SHAPES = ("circle", "square", "hexagon", "rectangle")
 
 
+def _tris_to_trimesh(triangles):
+    """Convert a flat list of ((x,y,z),(x,y,z),(x,y,z)) tuples to a trimesh."""
+    import trimesh
+    if not triangles:
+        return None
+    verts = np.array([v for tri in triangles for v in tri], dtype=np.float64)
+    faces = np.arange(len(verts)).reshape(-1, 3)
+    m = trimesh.Trimesh(vertices=verts, faces=faces, process=True)
+    m.update_faces(m.nondegenerate_faces())
+    m.remove_unreferenced_vertices()
+    return m
+
+
+def _split_terrain_at_z(terrain_tris, z_split, overlap_mm=0.06):
+    """Slice a terrain mesh horizontally at z_split into two watertight halves.
+
+    Returns (low_mesh, high_mesh) as trimesh.Trimesh objects.  Slicing uses
+    trimesh's slice_plane with cap=True (needs mapbox_earcut).  A tiny
+    `overlap_mm` (well below one layer height) keeps the halves internally
+    consistent even when the source mesh has small self-intersections; the
+    printed result fuses seamlessly.
+    """
+    import trimesh
+    mesh = _tris_to_trimesh(terrain_tris)
+    if mesh is None or len(mesh.faces) == 0:
+        return None, None
+    low = mesh.slice_plane(plane_origin=[0.0, 0.0, z_split],
+                           plane_normal=[0.0, 0.0, -1.0], cap=True)
+    high = mesh.slice_plane(plane_origin=[0.0, 0.0, z_split - overlap_mm],
+                            plane_normal=[0.0, 0.0, +1.0], cap=True)
+
+    def clean(m):
+        if m is None or len(m.faces) == 0:
+            return None
+        try:
+            m.update_faces(m.nondegenerate_faces())
+            m.remove_unreferenced_vertices()
+            trimesh.repair.fix_normals(m)
+        except Exception:
+            pass
+        return m
+
+    return clean(low), clean(high)
+
+
+def _save_3mf_parts(parts: list, path: str) -> bool:
+    """Write a list of (name, trimesh) parts into ONE 3MF file.
+
+    3MF is a container: each part appears as its own named object so a slicer
+    like BambuStudio or OrcaSlicer can assign a different filament / colour
+    per part.  Skips parts that are empty.
+    """
+    try:
+        import trimesh
+        scene = trimesh.Scene()
+        n_added = 0
+        for name, m in parts:
+            if m is None:
+                continue
+            if hasattr(m, "faces") and len(m.faces) == 0:
+                continue
+            scene.add_geometry(m, node_name=name, geom_name=name)
+            n_added += 1
+        if n_added == 0:
+            return False
+        scene.export(path)
+        return True
+    except Exception as exc:
+        print(f"  3MF export failed: {exc}")
+        return False
+
+
 def _generate_shape_ring(shape: str, radius_mm: float, N: int,
                           width_mm: float | None = None,
                           height_mm: float | None = None):
@@ -137,6 +209,7 @@ def build_and_export(
     max_relief_mm: float = 5.0,
     elev_min_override: float | None = None,
     elev_max_override: float | None = None,
+    elevation_split_m: float | None = None,
 ) -> None:
     """
     Build a solid terrain STL plus a track-tube body.
@@ -949,22 +1022,59 @@ def build_and_export(
     track_path = f"{base}_track{ext}"
     water_path = f"{base}_water{ext}"
 
-    _save_stl(terrain_tris, terrain_path)
-    print(f"  Saved: {terrain_path}")
+    # If an elevation split is requested, the whole model is written as ONE
+    # 3MF (which unlike STL can carry several separately colourable parts):
+    # terrain_low + terrain_high + track + water, each as a named part.  No
+    # STL / combined mesh is written in that case.
+    split_done = False
+    if elevation_split_m is not None and terrain_tris:
+        z_split = (float(elevation_split_m) - elev_min) * scale_z + base_height_mm
+        z_top_terrain = float(np.max([v[2] for tri in terrain_tris for v in tri]))
+        z_bot_terrain = float(np.min([v[2] for tri in terrain_tris for v in tri]))
+        if z_bot_terrain < z_split < z_top_terrain:
+            try:
+                low_mesh, high_mesh = _split_terrain_at_z(terrain_tris, z_split)
+                track_mesh = _tris_to_trimesh(track_tris) if track_tris else None
+                water_mesh = _tris_to_trimesh(water_tris) if water_tris else None
+                parts = [
+                    ("terrain_low",  low_mesh),
+                    ("terrain_high", high_mesh),
+                    ("track",        track_mesh),
+                    ("water",        water_mesh),
+                ]
+                path_3mf = f"{base}.3mf"
+                if _save_3mf_parts(parts, path_3mf):
+                    n_low  = len(low_mesh.faces)  if low_mesh  is not None else 0
+                    n_high = len(high_mesh.faces) if high_mesh is not None else 0
+                    print(f"  Saved: {path_3mf}  (split at {elevation_split_m:.0f} m: "
+                          f"{n_low} tris below / {n_high} tris above; "
+                          f"plus track and water parts)")
+                    split_done = True
+                else:
+                    print(f"  3MF export produced no parts; falling back to STL output.")
+            except Exception as exc:
+                print(f"  Terrain split failed ({exc}); falling back to STL output.")
+        else:
+            print(f"  Elevation split at {elevation_split_m:.0f} m is outside the "
+                  f"terrain range — no split written.")
 
-    if track_tris:
-        _save_stl(track_tris, track_path)
-        print(f"  Saved: {track_path}")
+    if not split_done:
+        _save_stl(terrain_tris, terrain_path)
+        print(f"  Saved: {terrain_path}")
 
-    if water_tris:
-        _save_stl(water_tris, water_path)
-        print(f"  Saved: {water_path}")
+        if track_tris:
+            _save_stl(track_tris, track_path)
+            print(f"  Saved: {track_path}")
 
-    # Also save combined STL for backward compatibility
-    all_tris = terrain_tris + track_tris + water_tris
-    _save_stl(all_tris, output_path)
+        if water_tris:
+            _save_stl(water_tris, water_path)
+            print(f"  Saved: {water_path}")
 
-    total = len(all_tris)
+        # Also save combined STL for backward compatibility
+        all_tris = terrain_tris + track_tris + water_tris
+        _save_stl(all_tris, output_path)
+
+    total = len(terrain_tris) + len(track_tris) + len(water_tris)
     print(f"  Total: {total} triangles "
           f"({len(terrain_tris)} terrain + {len(track_tris)} track + {len(water_tris)} water)")
 

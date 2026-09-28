@@ -58,26 +58,40 @@ def _split_terrain_at_z(terrain_tris, z_split, shell_thickness_mm=0.4):
 
 
 def _build_upper_shell(terrain_mesh, z_split: float,
-                        thickness_mm: float = 0.4):
+                        thickness_mm: float = 0.4,
+                        overlap_mm: float = 0.15):
     """Build a thin closed shell over the terrain surface where z > z_split.
 
-    Returns a list of triangles ((x,y,z), (x,y,z), (x,y,z)).  The shell
-    follows the terrain surface exactly on its underside and is offset by
-    `thickness_mm` upward on its top; boundary walls close it along the
-    z_split contour.  Terrain triangles crossing the contour are split so
-    the shell edge sits precisely on the 1800 m (or whatever) contour line.
+    The shell has two z-offsets from the terrain surface:
+      * top:    `+thickness_mm` above the terrain (default 0.4 mm)
+      * bottom: `-overlap_mm`  below the terrain  (default 0.15 mm)
+
+    The bottom face is deliberately pushed a bit INTO terrain_base, giving
+    the two parts a real solid-volume overlap.  A slicer sees the pair as
+    physically fused rather than as one object floating on top of another —
+    which is what the user reported when the cap merely touched the base
+    surface.  The total print height gains only `thickness_mm - overlap_mm`
+    (~0.25 mm) above the natural terrain surface, well within a couple of
+    print layers and visually imperceptible.
+
+    Terrain triangles crossing the z_split contour are split so the shell
+    edge sits precisely on the 1800 m (or whatever) contour line.
     """
     verts = terrain_mesh.vertices
     faces = terrain_mesh.faces
     face_normals = terrain_mesh.face_normals
 
     UP_THRESHOLD = 0.2   # face normals with z > this count as terrain top
-    delta = float(thickness_mm)
-    if delta <= 0:
+    top_off = float(thickness_mm)
+    bot_off = float(overlap_mm)
+    if top_off + bot_off <= 0:
         return []
 
-    def offset(p):
-        return (p[0], p[1], p[2] + delta)
+    def top_of(p):
+        return (p[0], p[1], p[2] + top_off)
+
+    def bot_of(p):
+        return (p[0], p[1], p[2] - bot_off)
 
     def edge_split(pa, pb):
         # Return the point where edge pa→pb crosses z = z_split.
@@ -109,7 +123,7 @@ def _build_upper_shell(terrain_mesh, z_split: float,
 
         if n_above == 3:
             # Fully above — whole triangle contributes to the shell.
-            _add_shell_triangle(triangles, p0, p1, p2, offset)
+            _add_shell_triangle(triangles, p0, p1, p2, top_of, bot_of)
             continue
 
         # Straddles the contour: split.  Find the "single" side.
@@ -122,10 +136,10 @@ def _build_upper_shell(terrain_mesh, z_split: float,
             e_ac = edge_split(a, c)
             # Preserve CCW winding of the original triangle.
             if (i_a, i_b, i_c) in ((0, 1, 2), (1, 2, 0), (2, 0, 1)):
-                _add_shell_triangle(triangles, a, e_ab, e_ac, offset)
+                _add_shell_triangle(triangles, a, e_ab, e_ac, top_of, bot_of)
                 contour_edges.append((e_ab, e_ac))
             else:
-                _add_shell_triangle(triangles, a, e_ac, e_ab, offset)
+                _add_shell_triangle(triangles, a, e_ac, e_ab, top_of, bot_of)
                 contour_edges.append((e_ac, e_ab))
         else:  # n_above == 2
             i_c = above.index(False)
@@ -134,20 +148,23 @@ def _build_upper_shell(terrain_mesh, z_split: float,
             e_ac = edge_split(a, c)
             e_bc = edge_split(b, c)
             if (i_a, i_b, i_c) in ((0, 1, 2), (1, 2, 0), (2, 0, 1)):
-                _add_shell_triangle(triangles, a, b, e_bc, offset)
-                _add_shell_triangle(triangles, a, e_bc, e_ac, offset)
+                _add_shell_triangle(triangles, a, b, e_bc, top_of, bot_of)
+                _add_shell_triangle(triangles, a, e_bc, e_ac, top_of, bot_of)
                 contour_edges.append((e_bc, e_ac))
             else:
-                _add_shell_triangle(triangles, a, e_bc, b, offset)
-                _add_shell_triangle(triangles, a, e_ac, e_bc, offset)
+                _add_shell_triangle(triangles, a, e_bc, b, top_of, bot_of)
+                _add_shell_triangle(triangles, a, e_ac, e_bc, top_of, bot_of)
                 contour_edges.append((e_ac, e_bc))
 
-    # Close the shell along its contour with a vertical rim of height `delta`.
+    # Close the shell along its contour with a vertical rim spanning
+    # (top_off + bot_off).  At the contour the rim starts BELOW z_split
+    # by `bot_off` (that portion sits inside terrain_base, i.e. the fused
+    # overlap) and ends `top_off` ABOVE.
     for (a, b) in contour_edges:
-        a_low  = a
-        b_low  = b
-        a_high = offset(a)
-        b_high = offset(b)
+        a_low  = bot_of(a)
+        b_low  = bot_of(b)
+        a_high = top_of(a)
+        b_high = top_of(b)
         # Side wall (outward-facing).  Winding chosen so the normal points
         # away from the mountain (into open air, matching the CCW top).
         triangles.append((a_low, b_low, b_high))
@@ -156,13 +173,19 @@ def _build_upper_shell(terrain_mesh, z_split: float,
     return triangles
 
 
-def _add_shell_triangle(out, p0, p1, p2, offset_fn):
-    """Add a shell triangle plus its offset twin (top + bottom of the shell)."""
-    # Top face: offset by +delta, same winding as source (normal up).
-    out.append((offset_fn(p0), offset_fn(p1), offset_fn(p2)))
-    # Bottom face: original z, winding reversed so the normal points down
-    # (into the terrain interior below the shell).
-    out.append((p0, p2, p1))
+def _add_shell_triangle(out, p0, p1, p2, top_fn, bot_fn):
+    """Add a shell triangle plus its offset twin (top + bottom of the shell).
+
+    top_fn(p) returns the point offset upward by the shell's above-terrain
+    thickness; bot_fn(p) returns the point offset DOWNWARD (into terrain_base)
+    by the overlap depth.  The overlap guarantees the two parts share solid
+    volume, so slicers treat them as a single fused body.
+    """
+    # Top face: raised by +top_off, same winding as source (normal up).
+    out.append((top_fn(p0), top_fn(p1), top_fn(p2)))
+    # Bottom face: sunk by -bot_off into terrain_base, winding reversed so
+    # the normal points down (into the material below the shell).
+    out.append((bot_fn(p0), bot_fn(p2), bot_fn(p1)))
 
 
 def _save_3mf_parts(parts: list, path: str) -> bool:

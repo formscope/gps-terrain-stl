@@ -21,27 +21,54 @@ def _tris_to_trimesh(triangles):
     return m
 
 
-def _split_terrain_at_z(terrain_tris, z_split, shell_thickness_mm=0.4):
+def _split_terrain_at_z(terrain_tris, z_split, shell_thickness_mm=0.4,
+                         track_buf_ms=None):
     """Return (base_mesh, cap_mesh) for a two-colour terrain print.
 
-    * base_mesh: the full unmodified terrain solid (prints with colour A).
-    * cap_mesh:  a thin closed shell that sits ON TOP of the terrain surface,
-                 present only where the terrain is above z_split — i.e. it
-                 hugs the mountain peaks like a snow cap and leaves the
-                 valleys untouched (no flat plate covering them).
+    Both parts are FULL VOLUMES that together reconstitute the terrain solid:
 
-    Thickness of the cap is `shell_thickness_mm` (default 0.4 mm ≈ 2 layers);
-    the print keeps the natural relief with only a barely-visible bump on
-    high-elevation surfaces.  In the slicer the cap object is assigned a
-    different filament than the base.
+    * base_mesh: everything with z <= z_split.  Includes the plate base, the
+                 side walls up to the cutoff, and — over the mountain
+                 massifs — a flat cap at z_split.  Prints with colour A.
+    * cap_mesh:  everything with z >= z_split (minus a tiny overlap).  Only
+                 present where terrain > z_split; the upper surface is the
+                 natural mountain relief.  Prints with colour B.
+
+    Because the cap is a full volume (not a thin shell) every layer above
+    z_split contains ONLY cap material — no more terrain_base showing
+    through as green stripes in the slice.
+
+    The track groove is already carved into the source terrain down to
+    basis_level (well below z_split), so the cap automatically leaves the
+    groove open.  As a defensive belt-and-braces we still subtract the
+    track buffer footprint from the cap where a track_buf_ms is supplied.
     """
     import trimesh
-    base = _tris_to_trimesh(terrain_tris)
-    if base is None or len(base.faces) == 0:
+    src = _tris_to_trimesh(terrain_tris)
+    if src is None or len(src.faces) == 0:
         return None, None
 
-    cap_tris = _build_upper_shell(base, z_split, shell_thickness_mm)
-    cap = _tris_to_trimesh(cap_tris) if cap_tris else None
+    overlap = 0.06   # sub-layer overlap keeps the two halves fused
+    base = src.slice_plane(plane_origin=[0.0, 0.0, z_split],
+                           plane_normal=[0.0, 0.0, -1.0], cap=True)
+    cap  = src.slice_plane(plane_origin=[0.0, 0.0, z_split - overlap],
+                           plane_normal=[0.0, 0.0, +1.0], cap=True)
+
+    # Belt-and-braces: erase any cap material that ended up sitting over
+    # the track groove.  In practice this happens only when a small ledge
+    # rises above z_split near the track path.
+    if cap is not None and track_buf_ms is not None \
+            and hasattr(track_buf_ms, "is_empty") and not track_buf_ms.is_empty:
+        try:
+            import shapely as _shp
+            centroids = cap.triangles_center
+            in_track = _shp.contains_xy(track_buf_ms,
+                                         centroids[:, 0], centroids[:, 1])
+            keep = ~in_track
+            cap.update_faces(keep)
+            cap.remove_unreferenced_vertices()
+        except Exception:
+            pass
 
     def clean(m):
         if m is None or len(m.faces) == 0:
@@ -55,137 +82,6 @@ def _split_terrain_at_z(terrain_tris, z_split, shell_thickness_mm=0.4):
         return m
 
     return clean(base), clean(cap)
-
-
-def _build_upper_shell(terrain_mesh, z_split: float,
-                        thickness_mm: float = 0.4,
-                        overlap_mm: float = 0.15):
-    """Build a thin closed shell over the terrain surface where z > z_split.
-
-    The shell has two z-offsets from the terrain surface:
-      * top:    `+thickness_mm` above the terrain (default 0.4 mm)
-      * bottom: `-overlap_mm`  below the terrain  (default 0.15 mm)
-
-    The bottom face is deliberately pushed a bit INTO terrain_base, giving
-    the two parts a real solid-volume overlap.  A slicer sees the pair as
-    physically fused rather than as one object floating on top of another —
-    which is what the user reported when the cap merely touched the base
-    surface.  The total print height gains only `thickness_mm - overlap_mm`
-    (~0.25 mm) above the natural terrain surface, well within a couple of
-    print layers and visually imperceptible.
-
-    Terrain triangles crossing the z_split contour are split so the shell
-    edge sits precisely on the 1800 m (or whatever) contour line.
-    """
-    verts = terrain_mesh.vertices
-    faces = terrain_mesh.faces
-    face_normals = terrain_mesh.face_normals
-
-    UP_THRESHOLD = 0.2   # face normals with z > this count as terrain top
-    top_off = float(thickness_mm)
-    bot_off = float(overlap_mm)
-    if top_off + bot_off <= 0:
-        return []
-
-    def top_of(p):
-        return (p[0], p[1], p[2] + top_off)
-
-    def bot_of(p):
-        return (p[0], p[1], p[2] - bot_off)
-
-    def edge_split(pa, pb):
-        # Return the point where edge pa→pb crosses z = z_split.
-        za, zb = pa[2], pb[2]
-        t = (z_split - za) / (zb - za) if abs(zb - za) > 1e-12 else 0.0
-        return (pa[0] + t * (pb[0] - pa[0]),
-                pa[1] + t * (pb[1] - pa[1]),
-                z_split)
-
-    triangles = []
-    contour_edges = []   # list of (p_a, p_b) segments on z=z_split
-
-    for f_idx, f in enumerate(faces):
-        # Only take the terrain's UPWARD-facing surface.  The base plate's
-        # walls and bottom aren't part of the "top skin" and stay out of
-        # the shell.
-        if face_normals[f_idx, 2] <= UP_THRESHOLD:
-            continue
-
-        p0, p1, p2 = verts[f[0]], verts[f[1]], verts[f[2]]
-        p0 = (float(p0[0]), float(p0[1]), float(p0[2]))
-        p1 = (float(p1[0]), float(p1[1]), float(p1[2]))
-        p2 = (float(p2[0]), float(p2[1]), float(p2[2]))
-
-        above = [p[2] > z_split for p in (p0, p1, p2)]
-        n_above = sum(above)
-        if n_above == 0:
-            continue
-
-        if n_above == 3:
-            # Fully above — whole triangle contributes to the shell.
-            _add_shell_triangle(triangles, p0, p1, p2, top_of, bot_of)
-            continue
-
-        # Straddles the contour: split.  Find the "single" side.
-        pts = [p0, p1, p2]
-        if n_above == 1:
-            i_a = above.index(True)
-            i_b, i_c = [i for i in range(3) if i != i_a]
-            a = pts[i_a]; b = pts[i_b]; c = pts[i_c]
-            e_ab = edge_split(a, b)
-            e_ac = edge_split(a, c)
-            # Preserve CCW winding of the original triangle.
-            if (i_a, i_b, i_c) in ((0, 1, 2), (1, 2, 0), (2, 0, 1)):
-                _add_shell_triangle(triangles, a, e_ab, e_ac, top_of, bot_of)
-                contour_edges.append((e_ab, e_ac))
-            else:
-                _add_shell_triangle(triangles, a, e_ac, e_ab, top_of, bot_of)
-                contour_edges.append((e_ac, e_ab))
-        else:  # n_above == 2
-            i_c = above.index(False)
-            i_a, i_b = [i for i in range(3) if i != i_c]
-            a = pts[i_a]; b = pts[i_b]; c = pts[i_c]
-            e_ac = edge_split(a, c)
-            e_bc = edge_split(b, c)
-            if (i_a, i_b, i_c) in ((0, 1, 2), (1, 2, 0), (2, 0, 1)):
-                _add_shell_triangle(triangles, a, b, e_bc, top_of, bot_of)
-                _add_shell_triangle(triangles, a, e_bc, e_ac, top_of, bot_of)
-                contour_edges.append((e_bc, e_ac))
-            else:
-                _add_shell_triangle(triangles, a, e_bc, b, top_of, bot_of)
-                _add_shell_triangle(triangles, a, e_ac, e_bc, top_of, bot_of)
-                contour_edges.append((e_ac, e_bc))
-
-    # Close the shell along its contour with a vertical rim spanning
-    # (top_off + bot_off).  At the contour the rim starts BELOW z_split
-    # by `bot_off` (that portion sits inside terrain_base, i.e. the fused
-    # overlap) and ends `top_off` ABOVE.
-    for (a, b) in contour_edges:
-        a_low  = bot_of(a)
-        b_low  = bot_of(b)
-        a_high = top_of(a)
-        b_high = top_of(b)
-        # Side wall (outward-facing).  Winding chosen so the normal points
-        # away from the mountain (into open air, matching the CCW top).
-        triangles.append((a_low, b_low, b_high))
-        triangles.append((a_low, b_high, a_high))
-
-    return triangles
-
-
-def _add_shell_triangle(out, p0, p1, p2, top_fn, bot_fn):
-    """Add a shell triangle plus its offset twin (top + bottom of the shell).
-
-    top_fn(p) returns the point offset upward by the shell's above-terrain
-    thickness; bot_fn(p) returns the point offset DOWNWARD (into terrain_base)
-    by the overlap depth.  The overlap guarantees the two parts share solid
-    volume, so slicers treat them as a single fused body.
-    """
-    # Top face: raised by +top_off, same winding as source (normal up).
-    out.append((top_fn(p0), top_fn(p1), top_fn(p2)))
-    # Bottom face: sunk by -bot_off into terrain_base, winding reversed so
-    # the normal points down (into the material below the shell).
-    out.append((bot_fn(p0), bot_fn(p2), bot_fn(p1)))
 
 
 def _save_3mf_parts(parts: list, path: str) -> bool:
@@ -213,6 +109,7 @@ def _save_3mf_parts(parts: list, path: str) -> bool:
     except Exception as exc:
         print(f"  3MF export failed: {exc}")
         return False
+
 
 
 def _generate_shape_ring(shape: str, radius_mm: float, N: int,
@@ -1168,7 +1065,24 @@ def build_and_export(
         z_bot_terrain = float(np.min([v[2] for tri in terrain_tris for v in tri]))
         if z_bot_terrain < z_split < z_top_terrain:
             try:
-                base_mesh, cap_mesh = _split_terrain_at_z(terrain_tris, z_split)
+                # Recompute the track's groove polygon in model space so the
+                # cap can be excluded from it — otherwise the cap bridges the
+                # groove and the printed track piece won't slot in any more.
+                track_buf_for_cap = None
+                if tx is not None and len(tx) >= 2:
+                    try:
+                        from shapely.geometry import LineString as _SLS_cap
+                        groove_hw = track_width_mm / 2.0 + track_tolerance_mm
+                        track_buf_for_cap = _SLS_cap(
+                            zip(tx.tolist(), ty.tolist())
+                        ).buffer(groove_hw)
+                    except Exception:
+                        track_buf_for_cap = None
+
+                base_mesh, cap_mesh = _split_terrain_at_z(
+                    terrain_tris, z_split,
+                    track_buf_ms=track_buf_for_cap,
+                )
                 track_mesh = _tris_to_trimesh(track_tris) if track_tris else None
                 water_mesh = _tris_to_trimesh(water_tris) if water_tris else None
                 # terrain_base carries the full relief in filament A.  The thin

@@ -48,27 +48,74 @@ def _split_terrain_at_z(terrain_tris, z_split, shell_thickness_mm=0.4,
     if src is None or len(src.faces) == 0:
         return None, None
 
-    overlap = 0.06   # sub-layer overlap keeps the two halves fused
-    base = src.slice_plane(plane_origin=[0.0, 0.0, z_split],
-                           plane_normal=[0.0, 0.0, -1.0], cap=True)
-    cap  = src.slice_plane(plane_origin=[0.0, 0.0, z_split - overlap],
+    # The raw terrain mesh has ~2 400 broken edges from t-junctions between
+    # the grid triangles, the ring stitch and the groove walls.  Slicing it
+    # yields non-manifold halves, which then can't be booleaned to cut the
+    # track path out.  Merge coincident vertices and drop duplicated /
+    # degenerate faces first — that gets both slice halves closed enough for
+    # manifold3d to accept them as volumes.
+    try:
+        src.merge_vertices(merge_tex=True, merge_norm=True)
+        src.update_faces(src.unique_faces())
+        src.update_faces(src.nondegenerate_faces())
+        trimesh.repair.fix_winding(src)
+        trimesh.repair.fix_inversion(src)
+    except Exception:
+        pass
+
+    # terrain_base is the FULL, unmodified terrain solid — no slicing.  Its
+    # top surface follows the natural relief everywhere, so there is no flat
+    # plateau at z_split showing up in the 3D preview as a "strange" flat
+    # surface.  In the slicer the base still prints filament A everywhere
+    # UNLESS the cap covers that region.
+    #
+    # terrain_high_cap is the mountain volume above z_split, capped at the
+    # cut plane with a flat lid.  Loaded into BambuStudio / OrcaSlicer as a
+    # separate object with a different filament, it takes over the print in
+    # every layer where its volume overlaps terrain_base — i.e. the whole
+    # region above z_split.  No stripes of filament A leak through because
+    # the cap is a full volume, not a thin skin.
+    base = src.copy()
+    cap  = src.slice_plane(plane_origin=[0.0, 0.0, z_split],
                            plane_normal=[0.0, 0.0, +1.0], cap=True)
 
-    # Belt-and-braces: erase any cap material that ended up sitting over
-    # the track groove.  In practice this happens only when a small ledge
-    # rises above z_split near the track path.
-    if cap is not None and track_buf_ms is not None \
+    # Shift the cap up by 0.02 mm so its mountain-top surface floats a hair
+    # above terrain_base's identical surface underneath.  Without this the
+    # two co-located surfaces z-fight in the 3D preview, which shows up as a
+    # flickering / broken-looking region.  0.02 mm is one-tenth of a print
+    # layer — invisible on paper.
+    if cap is not None and len(cap.faces) > 0:
+        cap.apply_translation([0.0, 0.0, 0.02])
+
+    # Cut the track groove out of the cap so the printed track piece slots in.
+    # A mesh-boolean would be ideal but manifold3d rejects the sliced halves
+    # (the source terrain has ~2 000 broken edges, so both slices come out as
+    # non-manifolds).  Instead we do an aggressive face filter: any triangle
+    # in the cap that has EVEN ONE vertex inside a slightly expanded track
+    # buffer is dropped, along with the centroid-in-buffer test.  That catches
+    # both the interior and the edge-crossing triangles, so the groove ends
+    # up continuously open all the way through the cap.
+    if cap is not None and len(cap.faces) > 0 and track_buf_ms is not None \
             and hasattr(track_buf_ms, "is_empty") and not track_buf_ms.is_empty:
         try:
             import shapely as _shp
+            # Expand the exclusion zone by ~0.1 mm to sweep in triangles whose
+            # centroid sits just outside the groove but whose edges cross it.
+            cut_buf = track_buf_ms.buffer(0.10)
+            v = cap.vertices
+            vx = v[:, 0]; vy = v[:, 1]
+            vert_in = _shp.contains_xy(cut_buf, vx, vy)
+            f = cap.faces
+            any_vert_in_track = vert_in[f[:, 0]] | vert_in[f[:, 1]] | vert_in[f[:, 2]]
             centroids = cap.triangles_center
-            in_track = _shp.contains_xy(track_buf_ms,
-                                         centroids[:, 0], centroids[:, 1])
-            keep = ~in_track
+            centroid_in_track = _shp.contains_xy(
+                cut_buf, centroids[:, 0], centroids[:, 1]
+            )
+            keep = ~(any_vert_in_track | centroid_in_track)
             cap.update_faces(keep)
             cap.remove_unreferenced_vertices()
-        except Exception:
-            pass
+        except Exception as exc:
+            print(f"  Track cutout on cap failed ({exc})")
 
     def clean(m):
         if m is None or len(m.faces) == 0:
